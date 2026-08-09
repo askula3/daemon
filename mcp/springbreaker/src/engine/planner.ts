@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createChildLogger } from '../utils/logger.js';
 import { compareVersions } from '../utils/semver.js';
+import { nexusLimit } from '../utils/concurrency.js';
 import type {
   ExecutionPlan,
   RemediationTask,
@@ -57,9 +58,9 @@ export class Planner {
       }
     }
 
-    // Process each vulnerable component (in parallel for Nexus lookups)
+    // Process each vulnerable component (bounded concurrency for Nexus lookups)
     const componentTasks = await Promise.all(
-      components.map(component => this.createTasksForComponent(component, graph))
+      components.map(component => nexusLimit(() => this.createTasksForComponent(component, graph)))
     );
     for (const ct of componentTasks) {
       tasks.push(...ct);
@@ -104,6 +105,10 @@ export class Planner {
       createdAt: new Date().toISOString(),
       policyUsed: this.policyEngine.getPolicy(),
       vulnerabilitiesBySeverity,
+      // Plan immutability fields — set by build-plan.ts after planner returns
+      gitRevision: projectInfo?.gitRevision ?? '',
+      projectFingerprint: '',
+      policyHash: '',
     };
 
     log.info(`Plan created with ${tasks.length} tasks in ${batches.length} batches`);
@@ -185,7 +190,7 @@ export class Planner {
 
     // Find the highest suggested version that's newer than current
     let targetVersion: string | null = null;
-    const sorted = suggestedVersions.sort((a, b) => compareVersions(b, a));
+    const sorted = [...suggestedVersions].sort((a, b) => compareVersions(b, a));
     for (const v of sorted) {
       if (compareVersions(v, currentBootVersion) > 0) {
         const evaluation = this.policyEngine.evaluateIQSuggestion(v, currentBootVersion);

@@ -36,11 +36,26 @@ export async function buildProjectInfo(
     hasNexusConfig: !!envConfig.nexusUsername,
   };
 
-  // Get git branch
+  // Get git branch, revision, and working-tree status
   let gitBranch = "unknown";
+  let gitRevision = "unknown";
+  let isClean = true;
+  let modifiedFiles: string[] = [];
   if (capabilities.hasGit) {
     try {
       gitBranch = await gitWorker.getCurrentBranch(projectPath);
+    } catch {
+      // Ignore git errors
+    }
+    try {
+      gitRevision = await gitWorker.getLastCommitHash(projectPath);
+    } catch {
+      // Ignore git errors
+    }
+    try {
+      const status = await gitWorker.getStatus(projectPath);
+      isClean = status.modified.length === 0 && status.staged.length === 0 && status.notAdded.length === 0;
+      modifiedFiles = [...status.modified, ...status.staged, ...status.notAdded];
     } catch {
       // Ignore git errors
     }
@@ -68,6 +83,9 @@ export async function buildProjectInfo(
   return {
     projectPath,
     gitBranch,
+    gitRevision,
+    isClean,
+    modifiedFiles,
     applicationId: envConfig.iqAppId,
     rootPomPath,
     rootPomContent,

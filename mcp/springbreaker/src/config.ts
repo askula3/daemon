@@ -1,7 +1,10 @@
 import { parse as dotenvParse } from 'dotenv';
 import { resolve, join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
+import { createChildLogger } from './utils/logger.js';
 import type { EnvConfig, PolicyConfig, Severity } from './types/index.js';
+
+const log = createChildLogger('Config');
 
 // Default policy configuration
 export const DEFAULT_POLICY: PolicyConfig = {
@@ -92,8 +95,7 @@ export function loadPolicyConfig(projectPath?: string): PolicyConfig {
       const content = readFileSync(policyPath, 'utf-8');
       filePolicy = JSON.parse(content);
     } catch (error) {
-      // Log warning so users know their policy file has issues
-      console.error(`Warning: Failed to parse ${policyPath}: ${error}`);
+      log.warn(`Failed to parse policy file ${policyPath}: ${error}`);
     }
   }
 

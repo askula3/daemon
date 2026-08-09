@@ -14,6 +14,7 @@ import { Planner } from "../engine/planner.js";
 import { planStore } from "../store.js";
 import { BuildPlanSchema } from "./schemas.js";
 import { buildProjectInfo } from "./project-info.js";
+import { computeProjectFingerprint, computePolicyHash } from "../utils/hash.js";
 
 const log = createChildLogger("BuildPlan");
 
@@ -49,12 +50,14 @@ export async function buildPlan(
         envConfig.mavenOpts,
       );
       const gitWorker = new GitWorker();
-      const iqWorker = new IQWorker(
-        envConfig.iqServerUrl,
-        envConfig.iqServerToken,
-        envConfig.iqAppId,
-        envConfig.iqUsername,
-      );
+      const iqWorker = envConfig.iqServerToken
+        ? new IQWorker(
+            envConfig.iqServerUrl,
+            envConfig.iqServerToken,
+            envConfig.iqAppId,
+            envConfig.iqUsername,
+          )
+        : null;
       const nexusWorker = envConfig.nexusUsername
         ? new NexusWorker(
             envConfig.nexusUrl,
@@ -77,9 +80,9 @@ export async function buildPlan(
       graphBuilder.markSpringBootManaged(projectInfo);
       graphBuilder.markDependencyManagement(projectInfo.dependencyManagement);
 
-      // Get IQ report
+      // Get IQ report (iqWorker is null when token is not configured)
       let iqReport = null;
-      if (envConfig.iqServerToken) {
+      if (iqWorker) {
         try {
           iqReport = await iqWorker.scanAndGetReport(envConfig.iqAppId);
           graphBuilder.markVulnerableComponents(iqReport);
@@ -101,6 +104,15 @@ export async function buildPlan(
 
       // Create plan
       const plan = await planner.createPlan(vulnerableComponents, envConfig.iqAppId, projectInfo);
+
+      // Add plan immutability fields (spec §21)
+      plan.gitRevision = projectInfo.gitRevision;
+      plan.projectFingerprint = computeProjectFingerprint(
+        projectInfo.rootPomContent,
+        projectInfo.modules,
+        projectInfo.dependencyManagement,
+      );
+      plan.policyHash = computePolicyHash(policyConfig as unknown as Record<string, unknown>);
 
       // Persist plan so execute_plan can look it up by ID
       planStore.savePlan(plan);

@@ -33,6 +33,9 @@ export interface ProjectCapabilities {
 export interface ProjectInfo {
   projectPath: string;
   gitBranch: string;
+  gitRevision: string;          // HEAD commit hash
+  isClean: boolean;             // working-tree has no uncommitted changes
+  modifiedFiles: string[];      // list of modified/untracked files in working tree
   applicationId: string;
   rootPomPath: string;
   rootPomContent: string;
@@ -146,6 +149,11 @@ export interface RemediationTask {
   status: TaskStatus;
   module?: string;  // for multi-module projects
   pomPath?: string;
+  metadata?: {
+    ownerGroupId?: string;     // owning dependency groupId (for exclude-and-replace)
+    ownerArtifactId?: string;  // owning dependency artifactId
+    [key: string]: unknown;
+  };
 }
 
 // Execution plan (DAG)
@@ -161,6 +169,10 @@ export interface ExecutionPlan {
   createdAt: string;
   policyUsed: PolicyConfig;
   vulnerabilitiesBySeverity: SummaryCount;  // severity breakdown from IQ report
+  // Plan immutability fields (spec §21)
+  gitRevision: string;           // Git HEAD at plan creation time
+  projectFingerprint: string;    // SHA-256 of key project files
+  policyHash: string;            // SHA-256 of serialized PolicyConfig
 }
 
 // Policy configuration
@@ -179,6 +191,11 @@ export interface PolicyConfig {
   verifyIq: boolean;
   maxBatchSize?: number;
   timeout?: number;
+  // Execution limits (spec §39 — prevent infinite loops)
+  maxReplans?: number;        // default: 3
+  maxBatches?: number;        // default: 10
+  maxMavenFailures?: number;  // default: 3
+  maxModifications?: number;  // default: 50
 }
 
 // Environment configuration
@@ -234,7 +251,21 @@ export interface ErrorRecord {
   error: string;
   rollbackAttempted: boolean;
   rollbackSuccess: boolean;
+  code?: FailureCode;  // structured failure classification
 }
+
+// Structured failure codes (spec §28)
+export type FailureCode =
+  | 'NO_FIX_AVAILABLE'
+  | 'POLICY_BLOCKED'
+  | 'VERSION_NOT_AVAILABLE'
+  | 'INCOMPATIBLE_UPGRADE'
+  | 'BUILD_FAILED'
+  | 'IQ_UNAVAILABLE'
+  | 'NEXUS_UNAVAILABLE'
+  | 'PROJECT_CHANGED'
+  | 'PLAN_INVALID'
+  | 'UNKNOWN';
 
 // Summary report
 export interface SummaryReport {

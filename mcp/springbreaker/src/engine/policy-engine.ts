@@ -233,16 +233,28 @@ export class PolicyEngine {
     }
   }
 
-  // Generate reason for the task
+  // Generate reason for the task (spec §34 — includes source of recommendation)
   private generateReason(
-    _priority: RemediationPriority,
+    priority: RemediationPriority,
     component: Component,
-    _targetVersion: string
+    targetVersion: string,
   ): string {
     const vulnCount = component.vulnerabilities.length;
     const severities = [...new Set(component.vulnerabilities.map(v => v.severity))].join(', ');
 
-    return `Fixes ${vulnCount} vulnerabilities (${severities}) in ${component.groupId}:${component.artifactId}`;
+    const sourceMap: Record<RemediationPriority, string> = {
+      'upgrade-spring-boot-parent': 'Spring Boot coordinated upgrade',
+      'upgrade-owning-direct-dependency': 'dependency ownership analysis',
+      'upgrade-direct-dependency': 'direct dependency upgrade',
+      'apply-iq-suggestion': 'IQ Server recommendation',
+      'search-nexus-latest': 'Nexus version search',
+      'override-transitive': 'transitive dependency override',
+      'exclude-and-replace': 'exclusion and replacement',
+      'remove-unused': 'unused dependency analysis',
+    };
+
+    const source = sourceMap[priority] ?? 'policy rule';
+    return `Fixes ${vulnCount} vulnerabilities (${severities}) via ${source}. Target: ${component.groupId}:${component.artifactId} → ${targetVersion}`;
   }
 
   // Get preconditions for a task

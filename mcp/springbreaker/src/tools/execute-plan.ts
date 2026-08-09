@@ -3,13 +3,19 @@ import { z } from "zod";
 import { createChildLogger } from "../utils/logger.js";
 import { handleToolError, POMError } from "../utils/errors.js";
 import { withProjectLock } from "../utils/lock.js";
-import { loadEnvConfig } from "../config.js";
+import { loadEnvConfig, loadPolicyConfig } from "../config.js";
+import { computeProjectFingerprint, computePolicyHash } from "../utils/hash.js";
 import { POMWorker } from "../workers/pom-worker.js";
 import { MavenWorker } from "../workers/maven-worker.js";
 import { GitWorker } from "../workers/git-worker.js";
 import { IQWorker } from "../workers/iq-worker.js";
+import { NexusWorker } from "../workers/nexus-worker.js";
+import { PolicyEngine } from "../engine/policy-engine.js";
+import { DependencyGraphBuilder } from "../engine/dependency-graph.js";
+import { Planner } from "../engine/planner.js";
 import { planStore } from "../store.js";
 import { ExecutePlanSchema } from "./schemas.js";
+import { buildProjectInfo } from "./project-info.js";
 import type {
   ExecutionResult,
   RemediationTask,
@@ -27,8 +33,15 @@ export async function executePlan(
 }> {
   return withProjectLock(args.projectPath, async () => {
     try {
-      const { projectPath, planId, approvedTasks } = args;
-      log.info(`Executing plan ${planId} for: ${projectPath}`);
+      const { projectPath, planId, approvedTasks, dryRun, commit: shouldCommit, createBranch } = args;
+      log.info(`Executing plan ${planId} for: ${projectPath}${dryRun ? ' (DRY RUN)' : ''}`);
+
+      // Execution limits (spec §39)
+      const policyConfig = loadPolicyConfig(projectPath);
+      const maxBatches = policyConfig.maxBatches ?? 10;
+      const maxMavenFailures = policyConfig.maxMavenFailures ?? 3;
+      const maxReplans = policyConfig.maxReplans ?? 3;
+      const maxModifications = policyConfig.maxModifications ?? 50;
 
       // Look up plan from store
       const plan = planStore.getPlan(planId);
@@ -54,6 +67,53 @@ export async function executePlan(
         : null;
 
       const executionId = randomUUID();
+      const execLog = log.withContext({ executionId, planId, project: projectPath });
+
+      // ── Plan Validation (spec §21) ──────────────────────────────────
+      if (plan.projectFingerprint) {
+        const currentInfo = await buildProjectInfo(
+          projectPath, pomWorker, mavenWorker, gitWorker, envConfig,
+        );
+        const currentFingerprint = computeProjectFingerprint(
+          currentInfo.rootPomContent,
+          currentInfo.modules,
+          currentInfo.dependencyManagement,
+        );
+        const currentPolicyHash = computePolicyHash(
+          plan.policyUsed as unknown as Record<string, unknown>,
+        );
+
+        const reasons: string[] = [];
+        if (plan.projectFingerprint !== currentFingerprint) {
+          reasons.push('Project files have changed since plan creation');
+        }
+        if (plan.gitRevision && plan.gitRevision !== currentInfo.gitRevision) {
+          reasons.push(
+            `Git revision changed: plan was created at ${plan.gitRevision.slice(0, 8)}, ` +
+            `now at ${currentInfo.gitRevision.slice(0, 8)}`
+          );
+        }
+        if (plan.policyHash && plan.policyHash !== currentPolicyHash) {
+          reasons.push('Policy configuration has changed since plan creation');
+        }
+
+        if (reasons.length > 0) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: "PLAN_INVALIDATED",
+                message: "Plan is stale and cannot be executed safely. Run build_plan again.",
+                reasons,
+                planId: plan.id,
+              }, null, 2),
+            }],
+            isError: true,
+          };
+        }
+        execLog.info("Plan validation passed — project state unchanged");
+      }
+
       const changes: ChangeRecord[] = [];
       const errors: ErrorRecord[] = [];
       const pomBackups = new Map<string, string>();
@@ -65,21 +125,46 @@ export async function executePlan(
           ? plan.tasks.filter((t) => approvedTasks.includes(t.id))
           : plan.tasks;
 
+      // ── Dry Run Mode (spec §37) ──────────────────────────────────
+      if (dryRun) {
+        const dryRunResult = {
+          mode: 'dry-run' as const,
+          planId: plan.id,
+          tasksToExecute: tasksToRun.length,
+          tasks: tasksToRun.map(t => ({
+            id: t.id,
+            priority: t.priority,
+            description: t.description,
+            component: t.component,
+            risk: t.risk,
+            confidence: t.confidence,
+            dependencies: t.dependencies,
+          })),
+          batches: plan.batches.length,
+          estimatedDuration: plan.estimatedDuration,
+          riskAssessment: plan.riskAssessment,
+        };
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(dryRunResult, null, 2) }],
+        };
+      }
+
       const startedAt = new Date().toISOString();
       let tasksCompleted = 0;
       let tasksFailed = 0;
       let tasksSkipped = 0;
 
       try {
-        // Create feature branch for safe rollback
+        // Create feature branch for safe rollback (spec §5 — opt-in)
         await gitWorker.init(projectPath);
-        const branchName = `springbreaker/remediation-${executionId.slice(0, 8)}`;
-
-        try {
-          await gitWorker.createBranch(projectPath, branchName);
-          log.info(`Created branch: ${branchName}`);
-        } catch (error) {
-          log.warn(`Could not create branch (continuing on current): ${error}`);
+        if (createBranch) {
+          const branchName = `springbreaker/remediation-${executionId.slice(0, 8)}`;
+          try {
+            await gitWorker.createBranch(projectPath, branchName);
+            execLog.info(`Created branch: ${branchName}`);
+          } catch (error) {
+            execLog.warn(`Could not create branch (continuing on current): ${error}`);
+          }
         }
 
         // Create POM backups BEFORE any modifications
@@ -89,9 +174,9 @@ export async function executePlan(
           try {
             const backupPath = await pomWorker.backupPom(pomPath);
             pomBackups.set(pomPath, backupPath);
-            log.info(`POM backup created: ${backupPath}`);
+            execLog.info(`POM backup created: ${backupPath}`);
           } catch (error) {
-            log.error(`Failed to create POM backup for ${pomPath}: ${error}`);
+            execLog.error(`Failed to create POM backup for ${pomPath}: ${error}`);
             throw new POMError(
               `Cannot proceed without POM backup for ${pomPath}: ${error instanceof Error ? error.message : String(error)}`,
             );
@@ -99,12 +184,61 @@ export async function executePlan(
         }
 
         // Execute tasks in batches — build verification happens per-batch, not per-task
-        for (const batch of plan.batches) {
+        let currentPlan = plan;
+        let replanCount = 0;
+        let mavenFailureCount = 0;
+        let totalBatchesProcessed = 0;
+        let totalModifications = changes.length;
+        let batchIndex = 0;
+
+        while (batchIndex < currentPlan.batches.length) {
+          const batch = currentPlan.batches[batchIndex];
           const batchTasks = batch.filter((t) =>
             tasksToRun.some((r) => r.id === t.id),
           );
 
-          if (batchTasks.length === 0) continue;
+          if (batchTasks.length === 0) {
+            batchIndex++;
+            continue;
+          }
+
+          // Enforce execution limits (spec §39)
+          if (totalBatchesProcessed >= maxBatches) {
+            execLog.warn(`Execution limit reached: max batches (${maxBatches})`);
+            errors.push({
+              task: "system",
+              phase: "execution",
+              error: `Execution limit reached: maximum ${maxBatches} batches`,
+              rollbackAttempted: false,
+              rollbackSuccess: false,
+              code: "UNKNOWN",
+            });
+            break;
+          }
+          if (mavenFailureCount >= maxMavenFailures) {
+            execLog.warn(`Execution limit reached: max Maven failures (${maxMavenFailures})`);
+            errors.push({
+              task: "system",
+              phase: "execution",
+              error: `Execution limit reached: maximum ${maxMavenFailures} Maven failures`,
+              rollbackAttempted: false,
+              rollbackSuccess: false,
+              code: "BUILD_FAILED",
+            });
+            break;
+          }
+          if (totalModifications >= maxModifications) {
+            execLog.warn(`Execution limit reached: max modifications (${maxModifications})`);
+            errors.push({
+              task: "system",
+              phase: "execution",
+              error: `Execution limit reached: maximum ${maxModifications} modifications`,
+              rollbackAttempted: false,
+              rollbackSuccess: false,
+              code: "UNKNOWN",
+            });
+            break;
+          }
 
           // Phase 1: Execute all tasks in this batch
           const batchChanges: ChangeRecord[] = [];
@@ -115,7 +249,7 @@ export async function executePlan(
               completedTaskIds.has(dep),
             );
             if (!depsSatisfied) {
-              log.warn(`Skipping task ${task.id} — dependencies not satisfied`);
+              execLog.warn(`Skipping task ${task.id} — dependencies not satisfied`);
               task.status = "skipped";
               tasksSkipped++;
               continue;
@@ -123,7 +257,7 @@ export async function executePlan(
 
             try {
               task.status = "in-progress";
-              log.info(`Executing task: ${task.description}`);
+              execLog.info(`Executing task: ${task.description}`);
 
               const taskResult = await executeRemediationTask(
                 task,
@@ -159,15 +293,15 @@ export async function executePlan(
                 rollbackAttempted: false,
                 rollbackSuccess: false,
               });
-              log.error(`Task ${task.id} failed: ${errMsg}`);
+              execLog.error(`Task ${task.id} failed: ${errMsg}`);
             }
           }
 
           // Phase 2: Verify build for the entire batch (not per-task)
-          if (batchChanges.length > 0 && plan.policyUsed.verifyBuild) {
+          if (batchChanges.length > 0 && currentPlan.policyUsed.verifyBuild) {
             const buildResult = await mavenWorker.cleanVerify(projectPath);
             if (!buildResult.success) {
-              log.warn(`Batch build failed — rolling back batch`);
+              execLog.warn(`Batch build failed — rolling back batch`);
               // Rollback ONLY the POMs modified in THIS batch. Restoring all
               // backups would revert earlier successful batches' changes too,
               // silently losing completed work.
@@ -178,14 +312,14 @@ export async function executePlan(
               for (const pomPath of touchedPoms) {
                 const backupPath = pomBackups.get(pomPath);
                 if (!backupPath) {
-                  log.error(`No backup for ${pomPath}`);
+                  execLog.error(`No backup for ${pomPath}`);
                   rollbackOk = false;
                   continue;
                 }
                 try {
                   await pomWorker.restorePom(backupPath, pomPath);
                 } catch {
-                  log.error(`Failed to restore ${pomPath}`);
+                  execLog.error(`Failed to restore ${pomPath}`);
                   rollbackOk = false;
                 }
               }
@@ -204,33 +338,130 @@ export async function executePlan(
                 error: `Batch build failed: ${buildResult.stderr.slice(-500)}`,
                 rollbackAttempted: true,
                 rollbackSuccess: rollbackOk,
+                code: "BUILD_FAILED",
               });
+              mavenFailureCount++;
+              totalBatchesProcessed++;
+              batchIndex++;
               continue;
             }
           }
 
           // Phase 3: Batch succeeded — commit changes and update counters
           changes.push(...batchChanges);
+          totalModifications += batchChanges.length;
+          totalBatchesProcessed++;
           for (const task of batchTasks) {
             if (task.status === "completed") {
               completedTaskIds.add(task.id);
               tasksCompleted++;
             }
           }
-        }
 
-        // Commit all changes
-        if (changes.length > 0) {
+          // ── Replan (spec §20) ─────────────────────────────────────
+          // After a successful batch, rescan IQ and replan if there's
+          // meaningful improvement. This prevents executing stale tasks
+          // that may have been resolved by earlier batches.
+          if (
+            iqWorker &&
+            plan.policyUsed.verifyIq &&
+            replanCount < maxReplans &&
+            batchIndex < currentPlan.batches.length - 1 // not the last batch
+          ) {
+            try {
+              const postBatchReport = await iqWorker.scanAndGetReport(envConfig.iqAppId);
+              const remainingVulns = postBatchReport.components.filter(c =>
+                c.vulnerabilities.some(v =>
+                  currentPlan.policyUsed.severity.includes(v.severity)
+                )
+              );
+
+              // Compare vulnerability counts, not task counts — a single task
+              // may fix multiple vulnerabilities, and a component may have vulns
+              // outside the current plan's scope.
+              const preBatchVulnCount = currentPlan.vulnerabilitiesBySeverity.total;
+              if (remainingVulns.length < preBatchVulnCount) {
+                execLog.info(
+                  `Replan #${replanCount + 1}: ${remainingVulns.length} components remaining ` +
+                  `(${tasksToRun.length - tasksCompleted} tasks left in current plan)`
+                );
+
+                // Rebuild graph and replan
+                const graphBuilder = new DependencyGraphBuilder();
+                const treeOutput = await mavenWorker.getDependencyTree(projectPath);
+                graphBuilder.buildFromMavenTree(treeOutput);
+                const projectInfo = await buildProjectInfo(
+                  projectPath, pomWorker, mavenWorker, gitWorker, envConfig,
+                );
+                graphBuilder.markSpringBootManaged(projectInfo);
+                graphBuilder.markDependencyManagement(projectInfo.dependencyManagement);
+                graphBuilder.markVulnerableComponents(postBatchReport);
+
+                const policyEngine = new PolicyEngine(currentPlan.policyUsed);
+                const nexusWorker = envConfig.nexusUsername
+                  ? new NexusWorker(envConfig.nexusUrl, envConfig.nexusUsername, envConfig.nexusPassword)
+                  : null;
+                const planner = new Planner(policyEngine, graphBuilder, nexusWorker);
+
+                const filteredComponents = policyEngine.filterComponentsByPolicy(postBatchReport.components);
+                const newPlan = await planner.createPlan(filteredComponents, envConfig.iqAppId, projectInfo);
+
+                // Set lineage
+                newPlan.previousPlanId = currentPlan.id;
+                newPlan.gitRevision = projectInfo.gitRevision;
+                newPlan.projectFingerprint = computeProjectFingerprint(
+                  projectInfo.rootPomContent,
+                  projectInfo.modules,
+                  projectInfo.dependencyManagement,
+                );
+                newPlan.policyHash = computePolicyHash(
+                  currentPlan.policyUsed as unknown as Record<string, unknown>,
+                );
+
+                planStore.savePlan(newPlan);
+
+                // Merge completed tasks from old plan into new plan.
+                // New plan tasks have fresh UUIDs, so we match by component
+                // identity (groupId:artifactId) instead of task ID.
+                const completedComponents = new Set(
+                  currentPlan.tasks
+                    .filter(t => completedTaskIds.has(t.id))
+                    .map(t => `${t.component.groupId}:${t.component.artifactId}`)
+                );
+                for (const newTask of newPlan.tasks) {
+                  const key = `${newTask.component.groupId}:${newTask.component.artifactId}`;
+                  if (completedComponents.has(key)) {
+                    newTask.status = "completed";
+                  }
+                }
+
+                currentPlan = newPlan;
+                replanCount++;
+                execLog.info(`Replan complete: new plan has ${newPlan.tasks.length} tasks in ${newPlan.batches.length} batches`);
+              }
+            } catch (error) {
+              execLog.warn(`Replan failed (continuing with current plan): ${error}`);
+            }
+          }
+
+          // Advance to next batch
+          batchIndex++;
+        } // end while (batch loop)
+
+        // Commit changes only when explicitly requested (spec §5)
+        if (shouldCommit && changes.length > 0) {
           try {
             await gitWorker.add(projectPath, ".");
             await gitWorker.commit(
               projectPath,
               `springbreaker: remediate ${tasksCompleted} vulnerabilities (${executionId.slice(0, 8)})`,
             );
-            log.info("Changes committed");
+            execLog.info("Changes committed");
           } catch (error) {
-            log.warn(`Could not commit changes: ${error}`);
+            execLog.warn(`Could not commit changes: ${error}`);
           }
+        } else if (changes.length > 0) {
+          execLog.info(`Changes applied but not committed (commit flag not set)`);
         }
 
         // Run IQ scan to count remaining vulnerabilities
@@ -249,7 +480,7 @@ export async function executePlan(
             vulnerabilitiesBySeverityAfter.medium = iqReport.vulnerabilitiesBySeverity.MEDIUM;
             vulnerabilitiesBySeverityAfter.low = iqReport.vulnerabilitiesBySeverity.LOW;
           } catch (error) {
-            log.warn(`IQ rescan failed: ${error}`);
+            execLog.warn(`IQ rescan failed: ${error}`);
             iqScanSuccess = false;
           }
         }
@@ -305,7 +536,7 @@ export async function executePlan(
           try {
             await pomWorker.restorePom(backupPath, pomPath);
           } catch {
-            log.error(`Failed to restore ${pomPath} from ${backupPath}`);
+            execLog.error(`Failed to restore ${pomPath} from ${backupPath}`);
           }
         }
 
@@ -424,11 +655,50 @@ async function executeRemediationTask(
     }
 
     case "exclude-and-replace": {
-      return {
-        success: false,
-        changes: [],
-        error: "exclude-and-replace not yet implemented",
-      };
+      // Exclude the vulnerable transitive from its owning dependency,
+      // then add the replacement at a safe version.
+      const ownerG = task.metadata?.ownerGroupId;
+      const ownerA = task.metadata?.ownerArtifactId;
+      if (!ownerG || !ownerA) {
+        return {
+          success: false,
+          changes: [],
+          error: "exclude-and-replace requires ownerGroupId and ownerArtifactId in task metadata",
+        };
+      }
+
+      // Step 1: Add exclusion to the owning dependency
+      const excluded = pomWorker.addExclusion(
+        pomData, ownerG, ownerA,
+        component.groupId, component.artifactId,
+      );
+
+      // Step 2: Add replacement dependency at the safe version
+      pomWorker.addDependency(
+        pomData,
+        component.groupId,
+        component.artifactId,
+        component.targetVersion,
+      );
+
+      if (excluded) {
+        await pomWorker.writePom(targetPomPath, pomData);
+        changes.push({
+          task: task.id,
+          pomPath: targetPomPath,
+          timestamp: new Date().toISOString(),
+          type: "exclude",
+          before: `${component.groupId}:${component.artifactId}:${component.currentVersion} (via ${ownerG}:${ownerA})`,
+          after: `${component.groupId}:${component.artifactId}:${component.targetVersion} (excluded from ${ownerG}:${ownerA})`,
+        });
+      } else {
+        return {
+          success: false,
+          changes: [],
+          error: `Could not add exclusion for ${component.groupId}:${component.artifactId} from ${ownerG}:${ownerA}`,
+        };
+      }
+      break;
     }
 
     case "remove-unused": {

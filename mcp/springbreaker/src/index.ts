@@ -3,7 +3,14 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { logger } from "./utils/logger.js";
+import type { LogLevel } from "./utils/logger.js";
 import { tools } from "./tools/index.js";
+
+// Apply LOG_LEVEL from environment at startup (spec §41)
+const envLogLevel = process.env.LOG_LEVEL?.toLowerCase() as LogLevel | undefined;
+if (envLogLevel && ['debug', 'info', 'warn', 'error'].includes(envLogLevel)) {
+  logger.setLevel(envLogLevel);
+}
 
 // Create MCP server
 const server = new McpServer(

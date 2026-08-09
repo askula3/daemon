@@ -176,4 +176,168 @@ describe("DependencyGraphBuilder", () => {
       expect(result[0].owner?.artifactId).toBe("guava");
     });
   });
+
+  describe("markSpringBootManaged", () => {
+    it("marks dependencies from Spring Boot parent as managed", () => {
+      const treeOutput = `[INFO] com.example:my-app:jar:1.0.0
+[INFO] +- org.springframework.boot:spring-boot-starter-web:jar:3.2.0:compile
+[INFO] |  +- org.springframework.boot:spring-boot-starter:jar:3.2.0:compile
+[INFO] |  |  +- org.springframework.boot:spring-boot:jar:3.2.0:compile`;
+
+      const builder = new DependencyGraphBuilder();
+      builder.buildFromMavenTree(treeOutput);
+
+      builder.markSpringBootManaged({
+        projectPath: '/test',
+        gitBranch: 'main',
+        gitRevision: 'abc',
+        isClean: true,
+        modifiedFiles: [],
+        applicationId: 'test',
+        rootPomPath: '/test/pom.xml',
+        rootPomContent: '',
+        modules: [],
+        javaVersion: '17',
+        springBootVersion: '3.2.0',
+        springBootParentVersion: '3.2.0',
+        parentGroupId: 'org.springframework.boot',
+        parentArtifactId: 'spring-boot-starter-parent',
+        parentVersion: '3.2.0',
+        dependencyManagement: [],
+        mavenProfiles: [],
+        capabilities: {
+          hasMaven: true, hasMavenWrapper: false, hasSpringBoot: true,
+          isMultiModule: false, hasGit: true, hasIQConfig: true, hasNexusConfig: true,
+        },
+        timestamp: new Date().toISOString(),
+      });
+
+      const graph = builder.getGraph();
+      expect(graph.springBootManaged.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("markDependencyManagement", () => {
+    it("marks dependencies declared in dependencyManagement", () => {
+      const treeOutput = `[INFO] com.example:my-app:jar:1.0.0
+[INFO] +- com.google.guava:guava:jar:31.1-jre:compile`;
+
+      const builder = new DependencyGraphBuilder();
+      builder.buildFromMavenTree(treeOutput);
+
+      builder.markDependencyManagement([
+        { groupId: 'com.google.guava', artifactId: 'guava', version: '31.1-jre' },
+      ]);
+
+      const guavaNode = builder.findNodeByArtifact('com.google.guava', 'guava');
+      expect(guavaNode?.isDeclaredInDependencyManagement).toBe(true);
+    });
+  });
+
+  describe("markVulnerableComponents", () => {
+    it("marks components with vulnerabilities from IQ report", () => {
+      const treeOutput = `[INFO] com.example:my-app:jar:1.0.0
+[INFO] +- com.google.guava:guava:jar:31.1-jre:compile`;
+
+      const builder = new DependencyGraphBuilder();
+      builder.buildFromMavenTree(treeOutput);
+
+      const report = {
+        reportId: 'r1',
+        applicationId: 'test',
+        scanId: 's1',
+        scanTime: new Date().toISOString(),
+        components: [{
+          packageUrl: 'pkg:maven/com.google.guava/guava@31.1-jre',
+          displayName: 'guava',
+          version: '31.1-jre',
+          groupId: 'com.google.guava',
+          artifactId: 'guava',
+          extension: 'jar',
+          vulnerabilities: [{
+            id: 'CVE-2023-1234',
+            referenceUrl: 'http://example.com',
+            description: 'Test',
+            severity: 'HIGH' as const,
+            cvssScore: 8.0,
+            CWEs: [],
+            licenseRisk: false,
+            componentDisplayName: 'guava',
+            pathNames: [],
+            fixVersions: ['32.0.0'],
+            firstPublished: '2024-01-01',
+            lastModified: '2024-01-01',
+          }],
+        }],
+        totalVulnerabilities: 1,
+        vulnerabilitiesBySeverity: { CRITICAL: 0, HIGH: 1, MEDIUM: 0, LOW: 0 },
+      };
+
+      builder.markVulnerableComponents(report);
+
+      const guavaNode = builder.findNodeByArtifact('com.google.guava', 'guava');
+      expect(guavaNode?.vulnerabilities.length).toBe(1);
+      expect(builder.getGraph().vulnerableComponents.length).toBe(1);
+    });
+  });
+
+  describe("findNodeByArtifact", () => {
+    it("finds a node by groupId and artifactId (version-agnostic)", () => {
+      const treeOutput = `[INFO] com.example:my-app:jar:1.0.0
+[INFO] +- com.google.guava:guava:jar:31.1-jre:compile`;
+
+      const builder = new DependencyGraphBuilder();
+      builder.buildFromMavenTree(treeOutput);
+
+      const node = builder.findNodeByArtifact('com.google.guava', 'guava');
+      expect(node).toBeDefined();
+      expect(node?.artifactId).toBe('guava');
+      expect(node?.version).toBe('31.1-jre');
+    });
+
+    it('returns undefined for nonexistent artifact', () => {
+      const treeOutput = `[INFO] com.example:my-app:jar:1.0.0
+[INFO] +- com.google.guava:guava:jar:31.1-jre:compile`;
+
+      const builder = new DependencyGraphBuilder();
+      builder.buildFromMavenTree(treeOutput);
+
+      const node = builder.findNodeByArtifact('nonexistent', 'dep');
+      expect(node).toBeUndefined();
+    });
+  });
+
+  describe("reset", () => {
+    it("clears the graph", () => {
+      const treeOutput = `[INFO] com.example:my-app:jar:1.0.0
+[INFO] +- com.google.guava:guava:jar:31.1-jre:compile`;
+
+      const builder = new DependencyGraphBuilder();
+      builder.buildFromMavenTree(treeOutput);
+      expect(builder.getGraph().nodes.size).toBeGreaterThan(0);
+
+      builder.reset();
+      expect(builder.getGraph().nodes.size).toBe(0);
+    });
+  });
+
+  describe("deep nesting", () => {
+    it("handles deeply nested dependencies (3+ levels)", () => {
+      const treeOutput = `[INFO] com.example:my-app:jar:1.0.0
+[INFO] +- com.example:level1:jar:1.0.0:compile
+[INFO] |  +- com.example:level2:jar:1.0.0:compile
+[INFO] |  |  +- com.example:level3:jar:1.0.0:compile
+[INFO] |  |  |  +- com.example:level4:jar:1.0.0:compile`;
+
+      const builder = new DependencyGraphBuilder();
+      builder.buildFromMavenTree(treeOutput);
+
+      const graph = builder.getGraph();
+      expect(graph.nodes.size).toBe(4);
+
+      const level4 = builder.findNodeByArtifact('com.example', 'level4');
+      expect(level4).toBeDefined();
+      expect(level4?.depth).toBe(4);
+    });
+  });
 });

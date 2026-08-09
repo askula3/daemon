@@ -36,19 +36,19 @@ cd mcp/springbreaker
 
 ## Commands
 
-| Task | Command | Notes |
-|------|---------|-------|
-| Install deps | `npm install` | |
-| Type check | `npm run typecheck` | `tsc --noEmit` |
-| Run tests | `npm test` | `vitest run` — ~62 tests, all pass |
-| Test watch | `npm run test:watch` | |
-| Test coverage | `npm run test:coverage` | |
-| Lint | `npm run lint` | `eslint src/ test/` — **currently broken** (ESLint 9 needs `eslint.config.js`; repo has `.eslintrc.json`) |
-| Lint + fix | `npm run lint:fix` | |
-| Build | `npm run build` | `tsc` → `dist/` |
-| Clean build | `npm run clean && npm run build` | |
-| Dev (watch) | `npm run dev` | `tsx watch src/index.ts` |
-| Run server | `npm start` | `node dist/index.js` |
+| Task          | Command                          | Notes                               |
+| ------------- | -------------------------------- | ----------------------------------- |
+| Install deps  | `npm install`                    |                                     |
+| Type check    | `npm run typecheck`              | `tsc --noEmit`                      |
+| Run tests     | `npm test`                       | `vitest run` — ~275 tests, all pass |
+| Test watch    | `npm run test:watch`             |                                     |
+| Test coverage | `npm run test:coverage`          |                                     |
+| Lint          | `npm run lint`                   | `eslint src/ test/`                 |
+| Lint + fix    | `npm run lint:fix`               |                                     |
+| Build         | `npm run build`                  | `tsc` → `dist/`                     |
+| Clean build   | `npm run clean && npm run build` |                                     |
+| Dev (watch)   | `npm run dev`                    | `tsx watch src/index.ts`            |
+| Run server    | `npm start`                      | `node dist/index.js`                |
 
 **Always run typecheck + tests + lint before considering a change complete.**
 
@@ -60,7 +60,7 @@ cd mcp/springbreaker
   is `.ts`:
   ```ts
   import { logger } from "../utils/logger.js"; // correct
-  import { logger } from "../utils/logger";   // wrong — breaks Node16 ESM
+  import { logger } from "../utils/logger"; // wrong — breaks Node16 ESM
   ```
 - `tsconfig.json` is strict: `strict: true`, `noUnusedLocals`, `noUnusedParameters`,
   `noImplicitReturns`, `noFallthroughCasesInSwitch`. Keep it clean.
@@ -92,22 +92,25 @@ mcp/springbreaker/src/
 │   ├── iq-worker.ts          # Sonatype IQ REST API
 │   └── nexus-worker.ts       # Nexus search for latest stable GA version
 └── utils/
-    ├── lock.ts               # withProjectLock() project-level mutex
-    ├── semver.ts             # parseVersion, compareVersions, isUpgradeAllowed…
-    ├── errors.ts             # MCPError base + POMError/IQServerError/NexusError…
-    ├── logger.ts             # createChildLogger() → stderr
+    ├── concurrency.ts         # Bounded p-limit for Nexus/IQ/Maven (spec §18)
+    ├── errors.ts              # MCPError base + POMError/IQServerError/NexusError…
+    ├── hash.ts                # SHA-256 fingerprinting for plan validation
+    ├── lock.ts                # withProjectLock() project-level mutex
+    ├── logger.ts              # createChildLogger() with structured context → stderr
+    ├── retry.ts               # withRetry() exponential backoff + jitter
+    ├── semver.ts              # parseVersion, compareVersions, isUpgradeAllowed…
     └── index.ts
 ```
 
 ### The 5 MCP tools
 
-| Tool | File | Purpose |
-|------|------|---------|
-| `inspect_project` | `inspect-project.ts` | Inspect a Maven project's structure/deps/capabilities |
-| `build_plan` | `build-plan.ts` | Fetch dep tree + IQ report, apply policy, build & persist plan |
-| `execute_plan` | `execute-plan.ts` | Execute approved plan in batches w/ per-batch verify + rollback |
-| `verify` | `verify.ts` | `mvn clean verify` + optional IQ scan |
-| `summarize` | `summarize.ts` | Summary from stored execution (read-only) |
+| Tool              | File                 | Purpose                                                         |
+| ----------------- | -------------------- | --------------------------------------------------------------- |
+| `inspect_project` | `inspect-project.ts` | Inspect a Maven project's structure/deps/capabilities           |
+| `build_plan`      | `build-plan.ts`      | Fetch dep tree + IQ report, apply policy, build & persist plan  |
+| `execute_plan`    | `execute-plan.ts`    | Execute approved plan in batches w/ per-batch verify + rollback |
+| `verify`          | `verify.ts`          | `mvn clean verify` + optional IQ scan                           |
+| `summarize`       | `summarize.ts`       | Summary from stored execution (read-only)                       |
 
 ### Server setup pattern (`src/index.ts`)
 
@@ -184,6 +187,15 @@ breaks the server.
 15. **Logging goes to stderr only** via `createChildLogger(context)` from
     `src/utils/logger.ts`. **Never log to stdout** — stdout carries the JSON-RPC protocol.
 
+16. **Structured logging with `withContext()`.** The child logger supports attaching
+    structured context (`executionId`, `planId`, `taskId`, `project`) via
+    `log.withContext({ executionId, planId })`. Use this in tool handlers to ensure all
+    log messages carry traceable identifiers (spec §41).
+
+17. **`execute_plan` commit/branch are opt-in.** The `commit` and `createBranch` flags
+    default to `false`. Never auto-commit or auto-branch without the caller's explicit
+    request (spec §5).
+
 ## Configuration
 
 - **Env vars** (see `.env.example` and `src/config.ts`): `IQ_SERVER_URL`, `IQ_SERVER_TOKEN`,
@@ -199,10 +211,23 @@ breaks the server.
 
 - **Framework:** Vitest 3 (`vitest.config.ts`: `globals: true`, `environment: 'node'`,
   `include: ['test/**/*.test.ts']`).
-- **Location:** `test/engine/` and `test/utils/` — 4 files, all unit tests:
-  `dependency-graph.test.ts`, `planner.test.ts`, `policy-engine.test.ts`, `semver.test.ts`.
-- **Gap:** workers (POM/Maven/Git/IQ/Nexus) and tools have **no integration tests**.
-  If you add tests, prefer covering these untested areas.
+- **Location:** 19 test files, ~275 tests across `test/engine/`, `test/utils/`,
+  `test/workers/`, and `test/tools/`:
+  - `engine/` — `dependency-graph.test.ts`, `planner.test.ts` (includes golden plan and
+    DAG invariant tests), `policy-engine.test.ts`
+  - `utils/` — `semver.test.ts`, `lock.test.ts`, `hash.test.ts`, `retry.test.ts`,
+    `concurrency.test.ts`, `errors.test.ts`, `logger.test.ts`
+  - `workers/` — `pom-worker.test.ts`, `git-worker.test.ts`, `nexus-worker.test.ts`,
+    `iq-worker.test.ts`, `maven-worker.test.ts`
+  - `tools/` — `tool-handler.test.ts` (integration tests for full pipeline)
+  - Root — `config.test.ts`, `store.test.ts`, `failure-injection.test.ts`
+- **Worker tests** mock I/O (fetch, simple-git, child_process) to test logic without
+  external services. For workers with retry logic, mock the private `request` method
+  to avoid timeout from exponential backoff.
+- **Integration tests** cover the full `build_plan` → `execute_plan` → `verify` →
+  `summarize` pipeline with all external I/O mocked.
+- **Failure injection tests** cover spec §45 scenarios: IQ 401/500, Nexus 404/500,
+  Maven build failure, malformed POM, no-fix-available, policy-blocked upgrades.
 
 ## Contribution rules
 

@@ -1,5 +1,7 @@
 import { createChildLogger } from '../utils/logger.js';
 import { NexusError } from '../utils/errors.js';
+import { withRetry, isRetryableHttpStatus } from '../utils/retry.js';
+import { nexusLimit } from '../utils/concurrency.js';
 import type { NexusArtifact } from '../types/index.js';
 import { isSnapshot, isPreRelease, isRedHatBuild, parseVersion, compareVersions } from '../utils/semver.js';
 
@@ -21,7 +23,7 @@ export class NexusWorker {
     return `Basic ${Buffer.from(`${this.username}:${this.password}`).toString('base64')}`;
   }
 
-  // Make API request
+  // Make API request with retries
   private async request<T>(
     endpoint: string,
     options: RequestInit = {}
@@ -35,26 +37,39 @@ export class NexusWorker {
 
     log.debug(`Nexus API request: ${options.method || 'GET'} ${url}`);
 
-    try {
-      const response = await fetch(url, {
-        ...options,
-        headers,
-      });
+    return withRetry(
+      async () => {
+        const response = await fetch(url, {
+          ...options,
+          headers,
+        });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        const truncated = errorText.length > 500 ? errorText.slice(0, 500) + '...' : errorText;
-        throw new NexusError(
-          `Nexus API error: ${response.status} ${response.statusText} - ${truncated}`,
-          'api-request'
-        );
-      }
+        if (!response.ok) {
+          const errorText = await response.text();
+          const truncated = errorText.length > 500 ? errorText.slice(0, 500) + '...' : errorText;
+          const err = new NexusError(
+            `Nexus API error: ${response.status} ${response.statusText} - ${truncated}`,
+            'api-request',
+          );
+          (err as unknown as Record<string, unknown>).status = response.status;
+          throw err;
+        }
 
-      return await response.json() as T;
-    } catch (error) {
-      if (error instanceof NexusError) throw error;
-      throw new NexusError(`Failed to connect to Nexus: ${error}`, 'api-request');
-    }
+        return await response.json() as T;
+      },
+      {
+        maxRetries: 3,
+        baseDelayMs: 1000,
+        label: `Nexus ${options.method || 'GET'} ${endpoint}`,
+        isRetryable: (error) => {
+          if (error instanceof NexusError) {
+            const status = (error as unknown as Record<string, unknown>).status;
+            if (typeof status === 'number') return isRetryableHttpStatus(status);
+          }
+          return true;
+        },
+      },
+    );
   }
 
   // Check Nexus connectivity
@@ -314,7 +329,8 @@ export class NexusWorker {
     };
   }
 
-  // Batch search for multiple artifacts
+  // Batch search for multiple artifacts — uses shared nexusLimit for
+  // consistent concurrency control across the codebase.
   async batchSearch(
     artifacts: Array<{ group: string; name: string }>,
     options: {
@@ -326,13 +342,8 @@ export class NexusWorker {
   ): Promise<Map<string, NexusArtifact | null>> {
     const results = new Map<string, NexusArtifact | null>();
 
-    // Process in parallel with concurrency limit
-    const concurrency = 5;
-    const queue = [...artifacts];
-
-    const processNext = async (): Promise<void> => {
-      while (queue.length > 0) {
-        const artifact = queue.shift()!;
+    const tasks = artifacts.map(artifact =>
+      nexusLimit(async () => {
         const key = `${artifact.group}:${artifact.name}`;
         try {
           const result = await this.getLatestStableVersion(
@@ -345,13 +356,10 @@ export class NexusWorker {
           log.warn(`Failed to search for ${key}: ${error}`);
           results.set(key, null);
         }
-      }
-    };
+      })
+    );
 
-    // Start workers
-    const workers = Array.from({ length: concurrency }, () => processNext());
-    await Promise.all(workers);
-
+    await Promise.all(tasks);
     return results;
   }
 }

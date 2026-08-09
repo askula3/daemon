@@ -214,7 +214,7 @@ export class POMWorker {
     >;
     if (!dependencyManagement) return [];
 
-    const dependencies = dependencyManagement.dependencies as Array<
+    const dependencies = (dependencyManagement.dependencies as Record<string, unknown>)?.dependency as Array<
       Record<string, unknown>
     >;
     if (!dependencies) return [];
@@ -239,7 +239,7 @@ export class POMWorker {
     exclusions?: Array<{ groupId: string; artifactId: string }>;
   }> {
     const project = (pomData.project as Record<string, unknown>) || {};
-    const dependencies = project.dependencies as Array<Record<string, unknown>>;
+    const dependencies = this.getDependencyArray(project);
     if (!dependencies) return [];
 
     return dependencies.map((dep) => ({
@@ -306,7 +306,7 @@ export class POMWorker {
     const project = (pomData.project as Record<string, unknown>) || {};
 
     // Check in dependencies
-    const dependencies = project.dependencies as Array<Record<string, unknown>>;
+    const dependencies = this.getDependencyArray(project);
     if (dependencies) {
       for (const dep of dependencies) {
         if (this.matchesDependency(dep, groupId, artifactId)) {
@@ -338,7 +338,8 @@ export class POMWorker {
 
     // Check in dependencyManagement (versions may be managed centrally)
     const depMgmt = project.dependencyManagement as Record<string, unknown>;
-    const managedDeps = depMgmt?.dependencies as Array<Record<string, unknown>>;
+    const depMgmtInner = depMgmt?.dependencies as Record<string, unknown> | undefined;
+    const managedDeps = depMgmtInner?.dependency as Array<Record<string, unknown>> | undefined;
     if (managedDeps) {
       for (const dep of managedDeps) {
         if (this.matchesDependency(dep, groupId, artifactId)) {
@@ -412,7 +413,7 @@ export class POMWorker {
     exclusionArtifactId: string,
   ): boolean {
     const project = (pomData.project as Record<string, unknown>) || {};
-    const dependencies = project.dependencies as Array<Record<string, unknown>>;
+    const dependencies = this.getDependencyArray(project);
 
     if (!dependencies) return false;
 
@@ -464,7 +465,7 @@ export class POMWorker {
     artifactId: string,
   ): boolean {
     const project = (pomData.project as Record<string, unknown>) || {};
-    const dependencies = project.dependencies as Array<Record<string, unknown>>;
+    const dependencies = this.getDependencyArray(project);
 
     if (!dependencies) return false;
 
@@ -490,11 +491,18 @@ export class POMWorker {
   ): void {
     const project = (pomData.project as Record<string, unknown>) || {};
 
+    // Ensure the dependencies wrapper is attached to the project object.
+    // Without this, creating a local wrapper means the dependency is
+    // silently lost when the POM is written back.
     if (!project.dependencies) {
-      project.dependencies = [];
+      project.dependencies = { dependency: [] };
+    }
+    const depsWrapper = project.dependencies as Record<string, unknown>;
+    if (!depsWrapper.dependency) {
+      depsWrapper.dependency = [];
     }
 
-    const dependencies = project.dependencies as Array<Record<string, unknown>>;
+    const dependencies = depsWrapper.dependency as Array<Record<string, unknown>>;
     dependencies.push({
       groupId,
       artifactId,
@@ -514,7 +522,7 @@ export class POMWorker {
     // This is a heuristic - in production, we'd use mvn dependency:analyze
     // For now, check if it's marked as provided or test scope
     const project = (pomData.project as Record<string, unknown>) || {};
-    const dependencies = project.dependencies as Array<Record<string, unknown>>;
+    const dependencies = this.getDependencyArray(project);
 
     if (!dependencies) return false;
 
@@ -544,6 +552,18 @@ export class POMWorker {
       this.extractValue(dep, "groupId") === groupId &&
       this.extractValue(dep, "artifactId") === artifactId
     );
+  }
+
+  // Helper to get the dependency array from parsed POM data.
+  // fast-xml-parser produces { dependencies: { dependency: [...] } }, not
+  // { dependencies: [...] }. This helper unwraps the intermediate object.
+  private getDependencyArray(
+    project: Record<string, unknown>,
+  ): Array<Record<string, unknown>> | undefined {
+    const deps = project.dependencies as Record<string, unknown> | undefined;
+    if (!deps) return undefined;
+    const arr = deps.dependency as Array<Record<string, unknown>> | undefined;
+    return arr;
   }
 
   // Helper to extract string value

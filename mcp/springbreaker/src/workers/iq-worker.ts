@@ -1,5 +1,6 @@
 import { createChildLogger } from '../utils/logger.js';
 import { IQServerError } from '../utils/errors.js';
+import { withRetry, isRetryableHttpStatus } from '../utils/retry.js';
 import type { IQReport, Component, Vulnerability, Severity } from '../types/index.js';
 
 const log = createChildLogger('IQWorker');
@@ -22,7 +23,7 @@ export class IQWorker {
     return `Basic ${Buffer.from(`${this.username}:${this.token}`).toString('base64')}`;
   }
 
-  // Make API request
+  // Make API request with retries
   private async request<T>(
     endpoint: string,
     options: RequestInit = {}
@@ -36,27 +37,41 @@ export class IQWorker {
 
     log.debug(`IQ API request: ${options.method || 'GET'} ${url}`);
 
-    try {
-      const response = await fetch(url, {
-        ...options,
-        headers,
-      });
+    return withRetry(
+      async () => {
+        const response = await fetch(url, {
+          ...options,
+          headers,
+        });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        // Truncate to avoid stuffing HTML error pages into MCP responses
-        const truncated = errorText.length > 500 ? errorText.slice(0, 500) + '...' : errorText;
-        throw new IQServerError(
-          `IQ API error: ${response.status} ${response.statusText} - ${truncated}`,
-          'api-request'
-        );
-      }
+        if (!response.ok) {
+          const errorText = await response.text();
+          const truncated = errorText.length > 500 ? errorText.slice(0, 500) + '...' : errorText;
+          const err = new IQServerError(
+            `IQ API error: ${response.status} ${response.statusText} - ${truncated}`,
+            'api-request',
+          );
+          // Attach status for retry classification
+          (err as unknown as Record<string, unknown>).status = response.status;
+          throw err;
+        }
 
-      return await response.json() as T;
-    } catch (error) {
-      if (error instanceof IQServerError) throw error;
-      throw new IQServerError(`Failed to connect to IQ Server: ${error}`, 'api-request');
-    }
+        return await response.json() as T;
+      },
+      {
+        maxRetries: 3,
+        baseDelayMs: 1000,
+        label: `IQ ${options.method || 'GET'} ${endpoint}`,
+        isRetryable: (error) => {
+          if (error instanceof IQServerError) {
+            const status = (error as unknown as Record<string, unknown>).status;
+            if (typeof status === 'number') return isRetryableHttpStatus(status);
+          }
+          // Connection errors are retryable
+          return true;
+        },
+      },
+    );
   }
 
   // Check IQ Server connectivity

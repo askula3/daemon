@@ -5,6 +5,7 @@ import { withProjectLock } from "../utils/lock.js";
 import { loadEnvConfig } from "../config.js";
 import { MavenWorker } from "../workers/maven-worker.js";
 import { IQWorker } from "../workers/iq-worker.js";
+import { planStore } from "../store.js";
 import { VerifySchema } from "./schemas.js";
 
 const log = createChildLogger("Verify");
@@ -15,21 +16,24 @@ export async function verify(args: z.infer<typeof VerifySchema>): Promise<{
 }> {
   return withProjectLock(args.projectPath, async () => {
     try {
-      const { projectPath } = args;
+      const { projectPath, skipBuild, skipIq, compareWithExecutionId } = args;
       log.info(`Verifying project: ${projectPath}`);
 
       const envConfig = loadEnvConfig(projectPath);
-      const mavenWorker = new MavenWorker(
-        envConfig.preferMvnw,
-        envConfig.mavenOpts,
-      );
 
-      // Run clean verify
-      const buildResult = await mavenWorker.cleanVerify(projectPath);
+      // Run clean verify (unless skipped)
+      let buildResult: { success: boolean; stdout: string; stderr: string } | null = null;
+      if (!skipBuild) {
+        const mavenWorker = new MavenWorker(
+          envConfig.preferMvnw,
+          envConfig.mavenOpts,
+        );
+        buildResult = await mavenWorker.cleanVerify(projectPath);
+      }
 
-      // Run IQ scan if configured
+      // Run IQ scan if configured and not skipped
       let iqResult = null;
-      if (envConfig.iqServerToken) {
+      if (!skipIq && envConfig.iqServerToken) {
         const iqWorker = new IQWorker(
           envConfig.iqServerUrl,
           envConfig.iqServerToken,
@@ -43,25 +47,56 @@ export async function verify(args: z.infer<typeof VerifySchema>): Promise<{
         }
       }
 
+      // Build response
+      const response: Record<string, unknown> = {
+        buildSuccess: buildResult?.success ?? null,
+        buildSkipped: !!skipBuild,
+        buildOutput: buildResult?.stdout.slice(-1000) ?? null,
+        iqScanResult: iqResult
+          ? {
+              totalVulnerabilities: iqResult.totalVulnerabilities,
+              vulnerabilitiesBySeverity: iqResult.vulnerabilitiesBySeverity,
+            }
+          : null,
+        iqScanSkipped: !!skipIq,
+      };
+
+      // Before/after comparison (spec §31)
+      if (compareWithExecutionId && iqResult) {
+        const prevState = planStore.getExecution(compareWithExecutionId);
+        if (prevState) {
+          const before = prevState.result.vulnerabilitiesBySeverityAfter;
+          const after = {
+            total: iqResult.totalVulnerabilities,
+            critical: iqResult.vulnerabilitiesBySeverity.CRITICAL,
+            high: iqResult.vulnerabilitiesBySeverity.HIGH,
+            medium: iqResult.vulnerabilitiesBySeverity.MEDIUM,
+            low: iqResult.vulnerabilitiesBySeverity.LOW,
+          };
+          response.comparison = {
+            executionId: compareWithExecutionId,
+            before,
+            after,
+            delta: {
+              total: after.total - before.total,
+              critical: after.critical - before.critical,
+              high: after.high - before.high,
+              medium: after.medium - before.medium,
+              low: after.low - before.low,
+            },
+          };
+        } else {
+          response.comparison = {
+            error: `Execution not found: ${compareWithExecutionId}`,
+          };
+        }
+      }
+
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(
-              {
-                buildSuccess: buildResult.success,
-                buildOutput: buildResult.stdout.slice(-1000),
-                iqScanResult: iqResult
-                  ? {
-                      totalVulnerabilities: iqResult.totalVulnerabilities,
-                      vulnerabilitiesBySeverity:
-                        iqResult.vulnerabilitiesBySeverity,
-                    }
-                  : null,
-              },
-              null,
-              2,
-            ),
+            text: JSON.stringify(response, null, 2),
           },
         ],
       };

@@ -137,9 +137,19 @@ Execute an approved remediation plan.
 {
   "projectPath": "/path/to/your/maven/project",
   "planId": "plan-id-from-build-plan",
-  "approvedTasks": ["task-id-1", "task-id-2"]
+  "approvedTasks": ["task-id-1", "task-id-2"],
+  "dryRun": false,
+  "commit": false,
+  "createBranch": false
 }
 ```
+
+| Field           | Default | Description                                    |
+| --------------- | ------- | ---------------------------------------------- |
+| `approvedTasks` | all     | Task IDs to execute (empty = all)              |
+| `dryRun`        | `false` | Preview changes without modifying files        |
+| `commit`        | `false` | Auto-commit changes after successful execution |
+| `createBranch`  | `false` | Create a feature branch before modifying files |
 
 #### 4. verify
 
@@ -232,6 +242,16 @@ Create `.vscode/mcp.json` in your workspace:
 │  │ POM      │ │ Policy   │ │ Planner  │                   │
 │  │ Worker   │ │ Engine   │ │ (DAG)    │                   │
 │  └──────────┘ └──────────┘ └──────────┘                   │
+├─────────────────────────────────────────────────────────────┤
+│  Utilities                                                  │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐      │
+│  │ Lock     │ │ SemVer   │ │ Retry    │ │ Hash     │      │
+│  │ (mutex)  │ │ (parse)  │ │ (backoff)│ │ (SHA-256)│      │
+│  └──────────┘ └──────────┘ └──────────┘ └──────────┘      │
+│  ┌──────────┐ ┌──────────┐                                 │
+│  │ Concur.  │ │ Logger   │                                 │
+│  │ (p-limit)│ │ (struct) │                                 │
+│  └──────────┘ └──────────┘                                 │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -258,6 +278,8 @@ The MCP follows this priority order:
 
 ## Testing
 
+~275 tests across 19 test files covering engine logic, utilities, workers, and tool handlers.
+
 ```bash
 # Run tests
 npm test
@@ -267,6 +289,35 @@ npm run test:watch
 
 # Run tests with coverage
 npm run test:coverage
+```
+
+### Test structure
+
+```
+test/
+├── config.test.ts              # Env + policy config loading
+├── store.test.ts               # In-memory plan store (LRU)
+├── engine/
+│   ├── dependency-graph.test.ts  # Maven tree parsing, ownership
+│   ├── planner.test.ts           # Golden plan tests, DAG invariants
+│   └── policy-engine.test.ts     # Severity filtering, priority logic
+├── failure-injection.test.ts     # Spec §45: IQ/Nexus/Maven/POM failure scenarios
+├── tools/
+│   ├── concurrency.test.ts       # Bounded concurrency limiters
+│   ├── errors.test.ts            # Error classes + handleToolError
+│   ├── hash.test.ts              # SHA-256 fingerprinting
+│   ├── lock.test.ts              # Project-level mutex
+│   ├── logger.test.ts            # Structured logging + withContext
+│   ├── retry.test.ts             # Exponential backoff
+│   └── semver.test.ts            # Version parsing + comparison
+├── tools/
+│   └── tool-handler.test.ts    # Integration: full pipeline (mocked I/O)
+└── workers/
+    ├── git-worker.test.ts        # Git operations (mocked simple-git)
+    ├── iq-worker.test.ts         # IQ API (mocked fetch)
+    ├── maven-worker.test.ts      # Maven spawn (mocked child_process)
+    ├── nexus-worker.test.ts      # Nexus API (mocked fetch)
+    └── pom-worker.test.ts        # POM XML read/write/modify
 ```
 
 ## Development

@@ -35,6 +35,20 @@ export const ExecutePlanSchema = z
       .array(z.string())
       .optional()
       .describe("Task IDs to execute (empty = all)"),
+    dryRun: z
+      .boolean()
+      .optional()
+      .describe("Preview changes without modifying files (spec §37)"),
+    commit: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe("Auto-commit changes after successful execution (spec §5 — default off)"),
+    createBranch: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe("Create a feature branch before modifying files (spec §5 — default off)"),
   })
   .describe("Execute an approved remediation plan");
 
@@ -42,6 +56,12 @@ export const ExecutePlanSchema = z
 export const VerifySchema = z
   .object({
     projectPath: z.string().describe("Path to the Maven project root"),
+    skipBuild: z.boolean().optional().describe("Skip Maven build verification"),
+    skipIq: z.boolean().optional().describe("Skip IQ scan verification"),
+    compareWithExecutionId: z
+      .string()
+      .optional()
+      .describe("Execution ID to compare against for before/after delta"),
   })
   .describe("Verify build and run IQ scan");
 
