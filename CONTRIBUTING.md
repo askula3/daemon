@@ -20,8 +20,8 @@ Run the full verification workflow (typecheck + tests + lint). See the
 [`run-tests-lint` skill](.github/skills/run-tests-lint/SKILL.md) for details.
 
 - [ ] `npm run typecheck` passes (strict TS — no unused vars/params)
-- [ ] `npm test` passes (~62 tests)
-- [ ] `npm run lint` passes *(currently broken — ESLint 9 needs `eslint.config.js`; see the skill)*
+- [ ] `npm test` passes (~275 tests)
+- [ ] `npm run lint` passes
 - [ ] `npm run build` succeeds (confirms ESM/Node16 resolution)
 - [ ] No secrets or internal URLs committed
 
@@ -53,10 +53,8 @@ See [`AGENTS.md`](./AGENTS.md) for the full list of pitfalls.
 ## Testing
 
 - Framework: **Vitest 3** (`globals: true`, `environment: 'node'`).
-- Tests live in `test/engine/` and `test/utils/` (unit tests for the dependency graph,
-  planner, policy engine, and semver utils).
-- **Gap:** workers (POM/Maven/Git/IQ/Nexus) and tools have no integration tests. New tests
-  covering these areas are especially welcome.
+- Tests live in `test/engine/`, `test/utils/`, `test/workers/`, and `test/tools/` covering
+  the dependency graph, planner, policy engine, semver utils, all workers, and tool handlers.
 - Add tests alongside any behavior change; don't weaken assertions to make tests pass.
 
 ## Architecture

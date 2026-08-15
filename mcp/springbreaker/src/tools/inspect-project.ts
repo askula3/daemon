@@ -31,14 +31,44 @@ export async function inspectProject(
       const gitWorker = new GitWorker();
 
       const result = await buildProjectInfo(
-        projectPath, pomWorker, mavenWorker, gitWorker, envConfig,
+        projectPath,
+        pomWorker,
+        mavenWorker,
+        gitWorker,
+        envConfig,
       );
+
+      // Add capability-aware recommendations
+      const recommendations: string[] = [];
+      if (!result.capabilities.hasIQConfig) {
+        recommendations.push(
+          "No IQ Server configured — vulnerability scanning is disabled. Set IQ_SERVER_TOKEN and IQ_APP_ID in .env to enable.",
+        );
+      }
+      if (!result.capabilities.hasNexusConfig) {
+        recommendations.push(
+          "No Nexus Repository configured — version resolution will use Maven Central (search.maven.org) as fallback.",
+        );
+      }
+      if (!result.capabilities.hasMaven) {
+        recommendations.push(
+          "Maven not found on PATH — install Maven or ensure the Maven wrapper (mvnw) is present and executable.",
+        );
+      }
+      if (!result.capabilities.hasGit) {
+        recommendations.push(
+          "Not a Git repository — branch/commit/rollback features are unavailable. Initialize git for full functionality.",
+        );
+      }
+
+      const response =
+        recommendations.length > 0 ? { ...result, recommendations } : result;
 
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(result, null, 2),
+            text: JSON.stringify(response, null, 2),
           },
         ],
       };

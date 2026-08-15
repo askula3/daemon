@@ -1,9 +1,9 @@
-import { createChildLogger } from '../utils/logger.js';
-import { IQServerError } from '../utils/errors.js';
-import { withRetry, isRetryableHttpStatus } from '../utils/retry.js';
-import type { IQReport, Component, Vulnerability, Severity } from '../types/index.js';
+import { createChildLogger } from "../utils/logger.js";
+import { IQServerError } from "../utils/errors.js";
+import { withRetry, isRetryableHttpStatus } from "../utils/retry.js";
+import type { IQReport, Component, Severity } from "../types/index.js";
 
-const log = createChildLogger('IQWorker');
+const log = createChildLogger("IQWorker");
 
 export class IQWorker {
   private baseUrl: string;
@@ -11,8 +11,13 @@ export class IQWorker {
   private token: string;
   private appId: string;
 
-  constructor(baseUrl: string, token: string, appId: string, username: string = 'admin') {
-    this.baseUrl = baseUrl.replace(/\/$/, '');
+  constructor(
+    baseUrl: string,
+    token: string,
+    appId: string,
+    username: string = "admin",
+  ) {
+    this.baseUrl = baseUrl.replace(/\/$/, "");
     this.username = username;
     this.token = token;
     this.appId = appId;
@@ -20,22 +25,22 @@ export class IQWorker {
 
   // Get authorization header
   private getAuthHeader(): string {
-    return `Basic ${Buffer.from(`${this.username}:${this.token}`).toString('base64')}`;
+    return `Basic ${Buffer.from(`${this.username}:${this.token}`).toString("base64")}`;
   }
 
   // Make API request with retries
   private async request<T>(
     endpoint: string,
-    options: RequestInit = {}
+    options: RequestInit = {},
   ): Promise<T> {
     const url = `${this.baseUrl}${endpoint}`;
     const headers = {
-      'Authorization': this.getAuthHeader(),
-      'Content-Type': 'application/json',
+      Authorization: this.getAuthHeader(),
+      "Content-Type": "application/json",
       ...options.headers,
     };
 
-    log.debug(`IQ API request: ${options.method || 'GET'} ${url}`);
+    log.debug(`IQ API request: ${options.method || "GET"} ${url}`);
 
     return withRetry(
       async () => {
@@ -46,26 +51,30 @@ export class IQWorker {
 
         if (!response.ok) {
           const errorText = await response.text();
-          const truncated = errorText.length > 500 ? errorText.slice(0, 500) + '...' : errorText;
+          const truncated =
+            errorText.length > 500
+              ? errorText.slice(0, 500) + "..."
+              : errorText;
           const err = new IQServerError(
             `IQ API error: ${response.status} ${response.statusText} - ${truncated}`,
-            'api-request',
+            "api-request",
           );
           // Attach status for retry classification
           (err as unknown as Record<string, unknown>).status = response.status;
           throw err;
         }
 
-        return await response.json() as T;
+        return (await response.json()) as T;
       },
       {
         maxRetries: 3,
         baseDelayMs: 1000,
-        label: `IQ ${options.method || 'GET'} ${endpoint}`,
+        label: `IQ ${options.method || "GET"} ${endpoint}`,
         isRetryable: (error) => {
           if (error instanceof IQServerError) {
             const status = (error as unknown as Record<string, unknown>).status;
-            if (typeof status === 'number') return isRetryableHttpStatus(status);
+            if (typeof status === "number")
+              return isRetryableHttpStatus(status);
           }
           // Connection errors are retryable
           return true;
@@ -74,31 +83,26 @@ export class IQWorker {
     );
   }
 
-  // Check IQ Server connectivity
-  async checkConnectivity(): Promise<boolean> {
-    try {
-      await this.request('/api/v2/system/ping');
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   // Get application info
   async getApplication(): Promise<{
     id: string;
     name: string;
     publicId: string;
   }> {
-    const response = await this.request<{ applications: Array<{
-      id: string;
-      name: string;
-      publicId: string;
-    }> }>(`/api/v2/applications?publicId=${this.appId}`);
+    const response = await this.request<{
+      applications: Array<{
+        id: string;
+        name: string;
+        publicId: string;
+      }>;
+    }>(`/api/v2/applications?publicId=${this.appId}`);
 
-    const app = response.applications?.find(a => a.publicId === this.appId);
+    const app = response.applications?.find((a) => a.publicId === this.appId);
     if (!app) {
-      throw new IQServerError(`Application not found: ${this.appId}`, 'get-application');
+      throw new IQServerError(
+        `Application not found: ${this.appId}`,
+        "get-application",
+      );
     }
 
     return app;
@@ -107,14 +111,14 @@ export class IQWorker {
   // Trigger policy evaluation scan
   async triggerScan(
     projectId: string,
-    scanType: 'source' | 'binary' = 'source'
+    scanType: "source" | "binary" = "source",
   ): Promise<string> {
     const endpoint = `/api/v2/scan/applications/${this.appId}`;
 
     log.info(`Triggering IQ scan for application: ${this.appId}`);
 
     const response = await this.request<{ scanId: string }>(endpoint, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify({
         scanType,
         projectId,
@@ -128,8 +132,8 @@ export class IQWorker {
   // Wait for scan to complete
   async waitForScan(
     scanId: string,
-    timeoutMs: number = 300000,  // 5 minutes
-    pollIntervalMs: number = 5000
+    timeoutMs: number = 300000, // 5 minutes
+    pollIntervalMs: number = 5000,
   ): Promise<{ status: string; reportUrl?: string }> {
     const startTime = Date.now();
 
@@ -141,24 +145,22 @@ export class IQWorker {
 
       log.debug(`Scan status: ${response.status}`);
 
-      if (response.status === 'finished' || response.status === 'completed') {
+      if (response.status === "finished" || response.status === "completed") {
         return response;
       }
 
-      if (response.status === 'failed' || response.status === 'error') {
-        throw new IQServerError(`Scan failed: ${response.status}`, 'wait-scan');
+      if (response.status === "failed" || response.status === "error") {
+        throw new IQServerError(`Scan failed: ${response.status}`, "wait-scan");
       }
 
-      await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
 
-    throw new IQServerError('Scan timed out', 'wait-scan');
+    throw new IQServerError("Scan timed out", "wait-scan");
   }
 
   // Get evaluation report
-  async getEvaluationReport(
-    reportUrl: string
-  ): Promise<IQReport> {
+  async getEvaluationReport(reportUrl: string): Promise<IQReport> {
     log.info(`Fetching evaluation report: ${reportUrl}`);
 
     const response = await this.request<{
@@ -197,14 +199,14 @@ export class IQWorker {
     }>(reportUrl);
 
     // Transform to our format
-    const components: Component[] = response.components.map(comp => ({
+    const components: Component[] = response.components.map((comp) => ({
       packageUrl: comp.packageUrl,
       displayName: comp.displayName,
       version: comp.version,
-      groupId: comp.componentIdentifier?.coordinates?.groupId || '',
-      artifactId: comp.componentIdentifier?.coordinates?.artifactId || '',
-      extension: comp.componentIdentifier?.coordinates?.extension || 'jar',
-      vulnerabilities: comp.violations.map(v => ({
+      groupId: comp.componentIdentifier?.coordinates?.groupId || "",
+      artifactId: comp.componentIdentifier?.coordinates?.artifactId || "",
+      extension: comp.componentIdentifier?.coordinates?.extension || "jar",
+      vulnerabilities: comp.violations.map((v) => ({
         id: v.violationId,
         referenceUrl: v.referenceUrl,
         description: v.description,
@@ -239,7 +241,7 @@ export class IQWorker {
     }
 
     return {
-      reportId: reportUrl.split('/').pop() || '',
+      reportId: reportUrl.split("/").pop() || "",
       applicationId: response.applicationId,
       scanId: response.scanId,
       scanTime: response.scanTime,
@@ -260,7 +262,10 @@ export class IQWorker {
     }>(`/api/v2/reports/evaluation/${this.appId}`);
 
     if (!response.reports || response.reports.length === 0) {
-      throw new IQServerError('No reports found for application', 'get-latest-report');
+      throw new IQServerError(
+        "No reports found for application",
+        "get-latest-report",
+      );
     }
 
     const latestReport = response.reports[0];
@@ -270,7 +275,7 @@ export class IQWorker {
   // Scan and get report (convenience method)
   async scanAndGetReport(
     projectId: string,
-    timeoutMs: number = 300000
+    timeoutMs: number = 300000,
   ): Promise<IQReport> {
     const scanId = await this.triggerScan(projectId);
     const scanResult = await this.waitForScan(scanId, timeoutMs);
@@ -281,64 +286,5 @@ export class IQWorker {
 
     // If no report URL, try to get latest
     return this.getLatestReport();
-  }
-
-  // Filter vulnerabilities by severity
-  filterBySeverity(
-    report: IQReport,
-    severities: Severity[]
-  ): Component[] {
-    return report.components
-      .map(comp => ({
-        ...comp,
-        vulnerabilities: comp.vulnerabilities.filter(
-          v => severities.includes(v.severity)
-        ),
-      }))
-      .filter(comp => comp.vulnerabilities.length > 0);
-  }
-
-  // Get component suggestions
-  getSuggestions(report: IQReport): Map<string, string> {
-    const suggestions = new Map<string, string>();
-
-    for (const comp of report.components) {
-      for (const vuln of comp.vulnerabilities) {
-        if (vuln.suggestedVersion) {
-          suggestions.set(comp.packageUrl, vuln.suggestedVersion);
-        }
-      }
-    }
-
-    return suggestions;
-  }
-
-  // Get vulnerabilities for a specific component
-  getVulnerabilitiesForComponent(
-    report: IQReport,
-    groupId: string,
-    artifactId: string
-  ): Vulnerability[] {
-    const comp = report.components.find(
-      c => c.groupId === groupId && c.artifactId === artifactId
-    );
-    return comp?.vulnerabilities || [];
-  }
-
-  // Get all unique vulnerabilities
-  getAllVulnerabilities(report: IQReport): Vulnerability[] {
-    const seen = new Set<string>();
-    const vulns: Vulnerability[] = [];
-
-    for (const comp of report.components) {
-      for (const vuln of comp.vulnerabilities) {
-        if (!seen.has(vuln.id)) {
-          seen.add(vuln.id);
-          vulns.push(vuln);
-        }
-      }
-    }
-
-    return vulns;
   }
 }

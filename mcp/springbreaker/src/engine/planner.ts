@@ -1,7 +1,7 @@
-import { randomUUID } from 'node:crypto';
-import { createChildLogger } from '../utils/logger.js';
-import { compareVersions } from '../utils/semver.js';
-import { nexusLimit } from '../utils/concurrency.js';
+import { randomUUID } from "node:crypto";
+import { createChildLogger } from "../utils/logger.js";
+import { compareVersions } from "../utils/semver.js";
+import { nexusLimit } from "../utils/concurrency.js";
 import type {
   ExecutionPlan,
   RemediationTask,
@@ -9,26 +9,30 @@ import type {
   DependencyGraph,
   SummaryCount,
   ProjectInfo,
-} from '../types/index.js';
-import { PolicyEngine } from './policy-engine.js';
-import { DependencyGraphBuilder } from './dependency-graph.js';
-import { NexusWorker } from '../workers/nexus-worker.js';
+} from "../types/index.js";
+import { PolicyEngine } from "./policy-engine.js";
+import { DependencyGraphBuilder } from "./dependency-graph.js";
+import { NexusWorker } from "../workers/nexus-worker.js";
+import { MavenCentralWorker } from "../workers/maven-central-worker.js";
 
-const log = createChildLogger('Planner');
+const log = createChildLogger("Planner");
 
 export class Planner {
   private policyEngine: PolicyEngine;
   private graphBuilder: DependencyGraphBuilder;
   private nexusWorker: NexusWorker | null;
+  private mavenCentralWorker: MavenCentralWorker | null;
 
   constructor(
     policyEngine: PolicyEngine,
     graphBuilder: DependencyGraphBuilder,
     nexusWorker?: NexusWorker | null,
+    mavenCentralWorker?: MavenCentralWorker | null,
   ) {
     this.policyEngine = policyEngine;
     this.graphBuilder = graphBuilder;
     this.nexusWorker = nexusWorker ?? null;
+    this.mavenCentralWorker = mavenCentralWorker ?? null;
   }
 
   // Create execution plan
@@ -45,7 +49,10 @@ export class Planner {
     // Check if we should try Spring Boot upgrade first
     const springBootManagedCount = this.countSpringBootManaged(components);
     if (
-      this.policyEngine.shouldTrySpringBootUpgradeFirst(springBootManagedCount, components.length) &&
+      this.policyEngine.shouldTrySpringBootUpgradeFirst(
+        springBootManagedCount,
+        components.length,
+      ) &&
       projectInfo?.springBootVersion
     ) {
       const bootTask = this.createSpringBootUpgradeTask(
@@ -60,7 +67,9 @@ export class Planner {
 
     // Process each vulnerable component (bounded concurrency for Nexus lookups)
     const componentTasks = await Promise.all(
-      components.map(component => nexusLimit(() => this.createTasksForComponent(component, graph)))
+      components.map((component) =>
+        nexusLimit(() => this.createTasksForComponent(component, graph)),
+      ),
     );
     for (const ct of componentTasks) {
       tasks.push(...ct);
@@ -80,16 +89,28 @@ export class Planner {
 
     // Compute severity breakdown from components
     const vulnerabilitiesBySeverity: SummaryCount = {
-      total: 0, critical: 0, high: 0, medium: 0, low: 0,
+      total: 0,
+      critical: 0,
+      high: 0,
+      medium: 0,
+      low: 0,
     };
     for (const component of components) {
       for (const vuln of component.vulnerabilities) {
         vulnerabilitiesBySeverity.total++;
         switch (vuln.severity) {
-          case 'CRITICAL': vulnerabilitiesBySeverity.critical++; break;
-          case 'HIGH': vulnerabilitiesBySeverity.high++; break;
-          case 'MEDIUM': vulnerabilitiesBySeverity.medium++; break;
-          case 'LOW': vulnerabilitiesBySeverity.low++; break;
+          case "CRITICAL":
+            vulnerabilitiesBySeverity.critical++;
+            break;
+          case "HIGH":
+            vulnerabilitiesBySeverity.high++;
+            break;
+          case "MEDIUM":
+            vulnerabilitiesBySeverity.medium++;
+            break;
+          case "LOW":
+            vulnerabilitiesBySeverity.low++;
+            break;
         }
       }
     }
@@ -106,19 +127,21 @@ export class Planner {
       policyUsed: this.policyEngine.getPolicy(),
       vulnerabilitiesBySeverity,
       // Plan immutability fields — set by build-plan.ts after planner returns
-      gitRevision: projectInfo?.gitRevision ?? '',
-      projectFingerprint: '',
-      policyHash: '',
+      gitRevision: projectInfo?.gitRevision ?? "",
+      projectFingerprint: "",
+      policyHash: "",
     };
 
-    log.info(`Plan created with ${tasks.length} tasks in ${batches.length} batches`);
+    log.info(
+      `Plan created with ${tasks.length} tasks in ${batches.length} batches`,
+    );
     return plan;
   }
 
   // Create tasks for a single component
   private async createTasksForComponent(
     component: Component,
-    graph: DependencyGraph
+    graph: DependencyGraph,
   ): Promise<RemediationTask[]> {
     const tasks: RemediationTask[] = [];
 
@@ -127,7 +150,8 @@ export class Planner {
     const node = graph.nodes.get(packageUrl);
 
     // Determine if it's a direct dependency
-    const isDirect = node?.isDirect ?? graph.directDependencies.includes(packageUrl);
+    const isDirect =
+      node?.isDirect ?? graph.directDependencies.includes(packageUrl);
     const isManagedBySpringBoot = node?.isManagedBySpringBoot ?? false;
     const isUnused = node ? !node.isUsed : false;
 
@@ -137,7 +161,7 @@ export class Planner {
     // the component's own version and corrupt the POM.
     if (isManagedBySpringBoot) {
       log.info(
-        `Skipping ${component.groupId}:${component.artifactId} — managed by Spring Boot, covered by parent upgrade`
+        `Skipping ${component.groupId}:${component.artifactId} — managed by Spring Boot, covered by parent upgrade`,
       );
       return tasks;
     }
@@ -146,7 +170,9 @@ export class Planner {
     const targetVersion = await this.findBestVersion(component);
 
     if (!targetVersion) {
-      log.warn(`No valid target version found for ${component.groupId}:${component.artifactId}`);
+      log.warn(
+        `No valid target version found for ${component.groupId}:${component.artifactId}`,
+      );
       return tasks;
     }
 
@@ -156,7 +182,7 @@ export class Planner {
       node ?? undefined,
       isManagedBySpringBoot,
       isDirect,
-      isUnused
+      isUnused,
     );
 
     // Create task
@@ -164,7 +190,7 @@ export class Planner {
       component,
       priority,
       targetVersion,
-      this.getTaskDependencies(component, graph)
+      this.getTaskDependencies(component, graph),
     );
 
     tasks.push(task);
@@ -193,7 +219,10 @@ export class Planner {
     const sorted = [...suggestedVersions].sort((a, b) => compareVersions(b, a));
     for (const v of sorted) {
       if (compareVersions(v, currentBootVersion) > 0) {
-        const evaluation = this.policyEngine.evaluateIQSuggestion(v, currentBootVersion);
+        const evaluation = this.policyEngine.evaluateIQSuggestion(
+          v,
+          currentBootVersion,
+        );
         if (evaluation.accepted) {
           targetVersion = v;
           break;
@@ -202,7 +231,9 @@ export class Planner {
     }
 
     if (!targetVersion) {
-      log.warn(`No valid Spring Boot upgrade target found from ${currentBootVersion}`);
+      log.warn(
+        `No valid Spring Boot upgrade target found from ${currentBootVersion}`,
+      );
       return null;
     }
 
@@ -216,23 +247,32 @@ export class Planner {
 
     return {
       id: randomUUID(),
-      priority: 'upgrade-spring-boot-parent',
+      priority: "upgrade-spring-boot-parent",
       description: `Upgrade Spring Boot ${currentBootVersion} → ${targetVersion}`,
       component: {
-        groupId: 'org.springframework.boot',
-        artifactId: 'spring-boot-starter-parent',
+        groupId: "org.springframework.boot",
+        artifactId: "spring-boot-starter-parent",
         currentVersion: currentBootVersion,
         targetVersion,
       },
       reason: `Spring Boot upgrade addresses ${expectedFixes.length} managed dependency vulnerabilities`,
       expectedFixes,
-      confidence: 'high',
-      risk: 'medium',
-      preconditions: ['Project builds successfully', 'Verify Spring Boot compatibility'],
-      verification: ['Run mvn clean verify', 'Run IQ scan to verify vulnerabilities resolved'],
-      rollbackSteps: ['Restore pom.xml from backup', 'Verify build succeeds after rollback'],
+      confidence: "high",
+      risk: "medium",
+      preconditions: [
+        "Project builds successfully",
+        "Verify Spring Boot compatibility",
+      ],
+      verification: [
+        "Run mvn clean verify",
+        "Run IQ scan to verify vulnerabilities resolved",
+      ],
+      rollbackSteps: [
+        "Restore pom.xml from backup",
+        "Verify build succeeds after rollback",
+      ],
       dependencies: [],
-      status: 'pending',
+      status: "pending",
     };
   }
 
@@ -243,7 +283,7 @@ export class Planner {
       if (vuln.suggestedVersion) {
         const evaluation = this.policyEngine.evaluateIQSuggestion(
           vuln.suggestedVersion,
-          component.version
+          component.version,
         );
         if (evaluation.accepted) {
           return vuln.suggestedVersion;
@@ -255,11 +295,16 @@ export class Planner {
     for (const vuln of component.vulnerabilities) {
       if (vuln.fixVersions && vuln.fixVersions.length > 0) {
         // Sort a COPY of fix versions descending (newest first) — avoid mutating the original
-        const sorted = [...vuln.fixVersions].sort((a, b) => compareVersions(b, a));
+        const sorted = [...vuln.fixVersions].sort((a, b) =>
+          compareVersions(b, a),
+        );
 
         // Check each fix version
         for (const fixVersion of sorted) {
-          const evaluation = this.policyEngine.evaluateIQSuggestion(fixVersion, component.version);
+          const evaluation = this.policyEngine.evaluateIQSuggestion(
+            fixVersion,
+            component.version,
+          );
           if (evaluation.accepted) {
             return fixVersion;
           }
@@ -281,14 +326,47 @@ export class Planner {
             allowSnapshots: policy.allowSnapshots,
             allowPreRelease: false,
             allowRedHat: policy.allowRedhat,
-          }
+          },
         );
         if (result.suggested) {
-          log.info(`Nexus suggested upgrade for ${component.groupId}:${component.artifactId}: ${component.version} → ${result.suggested} (${result.type})`);
+          log.info(
+            `Nexus suggested upgrade for ${component.groupId}:${component.artifactId}: ${component.version} → ${result.suggested} (${result.type})`,
+          );
           return result.suggested;
         }
       } catch (error) {
-        log.warn(`Nexus search failed for ${component.groupId}:${component.artifactId}: ${error}`);
+        log.warn(
+          `Nexus search failed for ${component.groupId}:${component.artifactId}: ${error}`,
+        );
+      }
+    }
+
+    // Fall back to Maven Central if no IQ suggestion or Nexus result
+    if (this.mavenCentralWorker) {
+      try {
+        const policy = this.policyEngine.getPolicy();
+        const result = await this.mavenCentralWorker.suggestUpgrade(
+          component.groupId,
+          component.artifactId,
+          component.version,
+          {
+            allowMinor: policy.allowMinor,
+            allowMajor: policy.allowMajor,
+            allowSnapshots: policy.allowSnapshots,
+            allowPreRelease: false,
+            allowRedHat: policy.allowRedhat,
+          },
+        );
+        if (result.suggested) {
+          log.info(
+            `Maven Central suggested upgrade for ${component.groupId}:${component.artifactId}: ${component.version} → ${result.suggested} (${result.type})`,
+          );
+          return result.suggested;
+        }
+      } catch (error) {
+        log.warn(
+          `Maven Central search failed for ${component.groupId}:${component.artifactId}: ${error}`,
+        );
       }
     }
 
@@ -299,7 +377,7 @@ export class Planner {
   // which remediation tasks must complete before others
   private getTaskDependencies(
     component: Component,
-    graph: DependencyGraph
+    graph: DependencyGraph,
   ): string[] {
     const dependencies: string[] = [];
 
@@ -332,7 +410,7 @@ export class Planner {
   // Resolve dependency markers into actual task IDs
   private resolveDependencyMarkers(
     tasks: RemediationTask[],
-    _graph: DependencyGraph
+    _graph: DependencyGraph,
   ): void {
     // Build a map from groupId:artifactId to task ID
     // This handles version mismatches between graph nodes and task components
@@ -352,9 +430,9 @@ export class Planner {
     // Resolve markers
     for (const task of tasks) {
       task.dependencies = task.dependencies
-        .map(dep => {
-          if (dep.startsWith('depends-on:')) {
-            const url = dep.slice('depends-on:'.length);
+        .map((dep) => {
+          if (dep.startsWith("depends-on:")) {
+            const url = dep.slice("depends-on:".length);
             // Try exact match first
             const taskId = urlToTaskId.get(url);
             if (taskId) return taskId;
@@ -388,7 +466,7 @@ export class Planner {
       for (const task of tasks) {
         if (processed.has(task.id)) continue;
 
-        const allProcessed = task.dependencies.every(d => processed.has(d));
+        const allProcessed = task.dependencies.every((d) => processed.has(d));
         if (allProcessed) {
           batch.push(task);
         }
@@ -396,16 +474,16 @@ export class Planner {
 
       if (batch.length === 0) {
         // No progress possible — circular dependency or dangling reference
-        const remaining = tasks.filter(t => !processed.has(t.id));
+        const remaining = tasks.filter((t) => !processed.has(t.id));
         log.error(
           `Circular dependency or dangling reference detected. ` +
-          `${remaining.length} task(s) cannot be scheduled: ` +
-          remaining.map(t => `${t.id} (${t.description})`).join(', ')
+            `${remaining.length} task(s) cannot be scheduled: ` +
+            remaining.map((t) => `${t.id} (${t.description})`).join(", "),
         );
 
         // Mark remaining tasks as skipped so they appear in the plan
         for (const task of remaining) {
-          task.status = 'skipped';
+          task.status = "skipped";
           processed.add(task.id);
         }
         break;
@@ -423,10 +501,12 @@ export class Planner {
   }
 
   // Calculate risk assessment
-  private calculateRiskAssessment(tasks: RemediationTask[]): 'low' | 'medium' | 'high' {
-    if (tasks.some(t => t.risk === 'high')) return 'high';
-    if (tasks.some(t => t.risk === 'medium')) return 'medium';
-    return 'low';
+  private calculateRiskAssessment(
+    tasks: RemediationTask[],
+  ): "low" | "medium" | "high" {
+    if (tasks.some((t) => t.risk === "high")) return "high";
+    if (tasks.some((t) => t.risk === "medium")) return "medium";
+    return "low";
   }
 
   // Estimate duration
@@ -434,22 +514,28 @@ export class Planner {
     // Rough estimate: 2 minutes per batch for builds/scans
     const estimatedMinutes = batches.length * 2;
 
-    if (estimatedMinutes < 5) return 'less than 5 minutes';
-    if (estimatedMinutes < 15) return '5-15 minutes';
-    if (estimatedMinutes < 30) return '15-30 minutes';
-    return 'more than 30 minutes';
+    if (estimatedMinutes < 5) return "less than 5 minutes";
+    if (estimatedMinutes < 15) return "5-15 minutes";
+    if (estimatedMinutes < 30) return "15-30 minutes";
+    return "more than 30 minutes";
   }
 
   // Generate summary
-  private generateSummary(tasks: RemediationTask[], components: Component[]): string {
+  private generateSummary(
+    tasks: RemediationTask[],
+    components: Component[],
+  ): string {
     const totalVulnerabilities = components.reduce(
       (sum, c) => sum + c.vulnerabilities.length,
-      0
+      0,
     );
-    const highPriority = tasks.filter(t => t.priority === 'upgrade-spring-boot-parent').length;
-    const mediumPriority = tasks.filter(t =>
-      t.priority === 'upgrade-owning-direct-dependency' ||
-      t.priority === 'upgrade-direct-dependency'
+    const highPriority = tasks.filter(
+      (t) => t.priority === "upgrade-spring-boot-parent",
+    ).length;
+    const mediumPriority = tasks.filter(
+      (t) =>
+        t.priority === "upgrade-owning-direct-dependency" ||
+        t.priority === "upgrade-direct-dependency",
     ).length;
 
     return `Plan addresses ${totalVulnerabilities} vulnerabilities across ${components.length} components with ${tasks.length} tasks (${highPriority} high priority, ${mediumPriority} medium priority)`;
@@ -470,36 +556,6 @@ export class Planner {
     return count;
   }
 
-  // Replan after batch execution
-  async replan(
-    currentPlan: ExecutionPlan,
-    completedTasks: string[],
-    remainingVulnerabilities: Component[]
-  ): Promise<ExecutionPlan> {
-    log.info(`Replanning after ${completedTasks.length} completed tasks`);
-
-    // Filter out completed tasks
-    const remainingTasks = currentPlan.tasks.filter(
-      t => !completedTasks.includes(t.id) && t.status !== 'completed'
-    );
-
-    // Create new plan with remaining vulnerabilities
-    const newPlan = await this.createPlan(remainingVulnerabilities, currentPlan.projectId);
-
-    // Merge with existing tasks
-    const mergedTasks = [...remainingTasks, ...newPlan.tasks];
-    const batches = this.buildBatches(mergedTasks);
-
-    return {
-      ...newPlan,
-      id: randomUUID(),  // New plan ID — old ExecutionState still references the old plan
-      previousPlanId: currentPlan.id,  // Track lineage for audit
-      tasks: mergedTasks,
-      batches,
-      summary: `Replan: ${remainingTasks.length} remaining + ${newPlan.tasks.length} new tasks`,
-    };
-  }
-
   // Validate plan
   validatePlan(plan: ExecutionPlan): string[] {
     const errors: string[] = [];
@@ -512,7 +568,7 @@ export class Planner {
       visited.add(taskId);
       recursionStack.add(taskId);
 
-      const task = plan.tasks.find(t => t.id === taskId);
+      const task = plan.tasks.find((t) => t.id === taskId);
       if (task) {
         for (const dep of task.dependencies) {
           if (!visited.has(dep)) {
@@ -538,7 +594,7 @@ export class Planner {
     // Check all dependencies exist
     for (const task of plan.tasks) {
       for (const dep of task.dependencies) {
-        if (!plan.tasks.some(t => t.id === dep)) {
+        if (!plan.tasks.some((t) => t.id === dep)) {
           errors.push(`Task ${task.id} depends on non-existent task ${dep}`);
         }
       }

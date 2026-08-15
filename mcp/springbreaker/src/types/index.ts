@@ -1,22 +1,33 @@
 // Severity levels for vulnerabilities
-export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
 
 // Dependency scope types
-export type DependencyScope = 'compile' | 'runtime' | 'test' | 'provided' | 'system';
+export type DependencyScope =
+  | "compile"
+  | "runtime"
+  | "test"
+  | "provided"
+  | "system";
 
 // Remediation priority levels (from design doc)
 export type RemediationPriority =
-  | 'upgrade-spring-boot-parent'
-  | 'upgrade-owning-direct-dependency'
-  | 'upgrade-direct-dependency'
-  | 'apply-iq-suggestion'
-  | 'search-nexus-latest'
-  | 'override-transitive'
-  | 'exclude-and-replace'
-  | 'remove-unused';
+  | "upgrade-spring-boot-parent"
+  | "upgrade-owning-direct-dependency"
+  | "upgrade-direct-dependency"
+  | "apply-iq-suggestion"
+  | "search-nexus-latest"
+  | "override-transitive"
+  | "exclude-and-replace"
+  | "remove-unused";
 
 // Task status
-export type TaskStatus = 'pending' | 'in-progress' | 'completed' | 'failed' | 'skipped' | 'rolled-back';
+export type TaskStatus =
+  | "pending"
+  | "in-progress"
+  | "completed"
+  | "failed"
+  | "skipped"
+  | "rolled-back";
 
 // Capabilities detected in the project
 export interface ProjectCapabilities {
@@ -33,9 +44,9 @@ export interface ProjectCapabilities {
 export interface ProjectInfo {
   projectPath: string;
   gitBranch: string;
-  gitRevision: string;          // HEAD commit hash
-  isClean: boolean;             // working-tree has no uncommitted changes
-  modifiedFiles: string[];      // list of modified/untracked files in working tree
+  gitRevision: string; // HEAD commit hash
+  isClean: boolean; // working-tree has no uncommitted changes
+  modifiedFiles: string[]; // list of modified/untracked files in working tree
   applicationId: string;
   rootPomPath: string;
   rootPomContent: string;
@@ -47,7 +58,6 @@ export interface ProjectInfo {
   parentArtifactId: string | null;
   parentVersion: string | null;
   dependencyManagement: DependencyManagementEntry[];
-  mavenProfiles: string[];
   capabilities: ProjectCapabilities;
   timestamp: string;
 }
@@ -111,8 +121,8 @@ export interface DependencyNode {
   isDirect: boolean;
   isManagedBySpringBoot: boolean;
   isDeclaredInDependencyManagement: boolean;
-  importedBy: string[];  // parent dependency PIDs
-  children: string[];    // transitive dependencies
+  importedBy: string[]; // parent dependency PIDs
+  children: string[]; // transitive dependencies
   vulnerabilities: Vulnerability[];
   isUsed: boolean;
   depth: number;
@@ -139,19 +149,19 @@ export interface RemediationTask {
     targetVersion: string;
   };
   reason: string;
-  expectedFixes: string[];  // vulnerability IDs that will be fixed
-  confidence: 'high' | 'medium' | 'low';
-  risk: 'low' | 'medium' | 'high';
+  expectedFixes: string[]; // vulnerability IDs that will be fixed
+  confidence: "high" | "medium" | "low";
+  risk: "low" | "medium" | "high";
   preconditions: string[];
   verification: string[];
   rollbackSteps: string[];
-  dependencies: string[];  // task IDs that must complete first
+  dependencies: string[]; // task IDs that must complete first
   status: TaskStatus;
-  module?: string;  // for multi-module projects
+  module?: string; // for multi-module projects
   pomPath?: string;
   metadata?: {
-    ownerGroupId?: string;     // owning dependency groupId (for exclude-and-replace)
-    ownerArtifactId?: string;  // owning dependency artifactId
+    ownerGroupId?: string; // owning dependency groupId (for exclude-and-replace)
+    ownerArtifactId?: string; // owning dependency artifactId
     [key: string]: unknown;
   };
 }
@@ -160,19 +170,19 @@ export interface RemediationTask {
 export interface ExecutionPlan {
   id: string;
   projectId: string;
-  previousPlanId?: string;  // Set during replan — tracks lineage for audit
+  previousPlanId?: string; // Set during replan — tracks lineage for audit
   tasks: RemediationTask[];
-  batches: RemediationTask[][];  // tasks grouped by dependency level
+  batches: RemediationTask[][]; // tasks grouped by dependency level
   estimatedDuration: string;
-  riskAssessment: 'low' | 'medium' | 'high';
+  riskAssessment: "low" | "medium" | "high";
   summary: string;
   createdAt: string;
   policyUsed: PolicyConfig;
-  vulnerabilitiesBySeverity: SummaryCount;  // severity breakdown from IQ report
+  vulnerabilitiesBySeverity: SummaryCount; // severity breakdown from IQ report
   // Plan immutability fields (spec §21)
-  gitRevision: string;           // Git HEAD at plan creation time
-  projectFingerprint: string;    // SHA-256 of key project files
-  policyHash: string;            // SHA-256 of serialized PolicyConfig
+  gitRevision: string; // Git HEAD at plan creation time
+  projectFingerprint: string; // SHA-256 of key project files
+  policyHash: string; // SHA-256 of serialized PolicyConfig
 }
 
 // Policy configuration
@@ -192,10 +202,10 @@ export interface PolicyConfig {
   maxBatchSize?: number;
   timeout?: number;
   // Execution limits (spec §39 — prevent infinite loops)
-  maxReplans?: number;        // default: 3
-  maxBatches?: number;        // default: 10
-  maxMavenFailures?: number;  // default: 3
-  maxModifications?: number;  // default: 50
+  maxReplans?: number; // default: 3
+  maxBatches?: number; // default: 10
+  maxMavenFailures?: number; // default: 3
+  maxModifications?: number; // default: 50
 }
 
 // Environment configuration
@@ -218,7 +228,7 @@ export interface ExecutionResult {
   planId: string;
   startedAt: string;
   completedAt: string;
-  status: 'completed' | 'failed' | 'partial';
+  status: "completed" | "failed" | "partial";
   tasksCompleted: number;
   tasksFailed: number;
   tasksSkipped: number;
@@ -239,7 +249,7 @@ export interface ChangeRecord {
   task: string;
   pomPath: string;
   timestamp: string;
-  type: 'upgrade' | 'add' | 'remove' | 'exclude';
+  type: "upgrade" | "add" | "remove" | "exclude";
   before: string;
   after: string;
 }
@@ -251,40 +261,21 @@ export interface ErrorRecord {
   error: string;
   rollbackAttempted: boolean;
   rollbackSuccess: boolean;
-  code?: FailureCode;  // structured failure classification
+  code?: FailureCode; // structured failure classification
 }
 
 // Structured failure codes (spec §28)
 export type FailureCode =
-  | 'NO_FIX_AVAILABLE'
-  | 'POLICY_BLOCKED'
-  | 'VERSION_NOT_AVAILABLE'
-  | 'INCOMPATIBLE_UPGRADE'
-  | 'BUILD_FAILED'
-  | 'IQ_UNAVAILABLE'
-  | 'NEXUS_UNAVAILABLE'
-  | 'PROJECT_CHANGED'
-  | 'PLAN_INVALID'
-  | 'UNKNOWN';
-
-// Summary report
-export interface SummaryReport {
-  projectId: string;
-  executionId: string;
-  timestamp: string;
-  initialVulnerabilities: SummaryCount;
-  finalVulnerabilities: SummaryCount;
-  resolvedVulnerabilities: SummaryCount;
-  changes: {
-    dependenciesUpgraded: number;
-    dependenciesAdded: number;
-    dependenciesRemoved: number;
-    exclusionsAdded: number;
-    pomFilesModified: string[];
-  };
-  buildStatus: 'success' | 'failure';
-  recommendations: string[];
-}
+  | "NO_FIX_AVAILABLE"
+  | "POLICY_BLOCKED"
+  | "VERSION_NOT_AVAILABLE"
+  | "INCOMPATIBLE_UPGRADE"
+  | "BUILD_FAILED"
+  | "IQ_UNAVAILABLE"
+  | "NEXUS_UNAVAILABLE"
+  | "PROJECT_CHANGED"
+  | "PLAN_INVALID"
+  | "UNKNOWN";
 
 // Summary count by severity
 export interface SummaryCount {
@@ -321,7 +312,7 @@ export interface ExecutionState {
   executionId: string;
   plan: ExecutionPlan;
   result: ExecutionResult;
-  pomBackups: Map<string, string>;  // pomPath → backupPath
+  pomBackups: Map<string, string>; // pomPath → backupPath
   startedAt: string;
   completedAt?: string;
 }

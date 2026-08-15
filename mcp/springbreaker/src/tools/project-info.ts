@@ -54,8 +54,15 @@ export async function buildProjectInfo(
     }
     try {
       const status = await gitWorker.getStatus(projectPath);
-      isClean = status.modified.length === 0 && status.staged.length === 0 && status.notAdded.length === 0;
-      modifiedFiles = [...status.modified, ...status.staged, ...status.notAdded];
+      isClean =
+        status.modified.length === 0 &&
+        status.staged.length === 0 &&
+        status.notAdded.length === 0;
+      modifiedFiles = [
+        ...status.modified,
+        ...status.staged,
+        ...status.notAdded,
+      ];
     } catch {
       // Ignore git errors
     }
@@ -97,7 +104,6 @@ export async function buildProjectInfo(
     parentArtifactId: projectInfo.parent?.artifactId || null,
     parentVersion: projectInfo.parent?.version || null,
     dependencyManagement,
-    mavenProfiles: [],
     capabilities,
     timestamp: new Date().toISOString(),
   };

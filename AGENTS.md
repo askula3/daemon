@@ -40,7 +40,7 @@ cd mcp/springbreaker
 | ------------- | -------------------------------- | ----------------------------------- |
 | Install deps  | `npm install`                    |                                     |
 | Type check    | `npm run typecheck`              | `tsc --noEmit`                      |
-| Run tests     | `npm test`                       | `vitest run` — ~275 tests, all pass |
+| Run tests     | `npm test`                       | `vitest run` — ~253 tests, all pass |
 | Test watch    | `npm run test:watch`             |                                     |
 | Test coverage | `npm run test:coverage`          |                                     |
 | Lint          | `npm run lint`                   | `eslint src/ test/`                 |
@@ -90,7 +90,8 @@ mcp/springbreaker/src/
 │   ├── maven-worker.ts       # spawn() Maven, dependency:tree, clean verify
 │   ├── git-worker.ts         # simple-git branch/commit/restore
 │   ├── iq-worker.ts          # Sonatype IQ REST API
-│   └── nexus-worker.ts       # Nexus search for latest stable GA version
+│   ├── nexus-worker.ts       # Nexus search for latest stable GA version
+│   └── maven-central-worker.ts # Public Maven Central fallback (no auth)
 └── utils/
     ├── concurrency.ts         # Bounded p-limit for Nexus/IQ/Maven (spec §18)
     ├── errors.ts              # MCPError base + POMError/IQServerError/NexusError…

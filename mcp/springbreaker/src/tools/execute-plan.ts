@@ -10,6 +10,7 @@ import { MavenWorker } from "../workers/maven-worker.js";
 import { GitWorker } from "../workers/git-worker.js";
 import { IQWorker } from "../workers/iq-worker.js";
 import { NexusWorker } from "../workers/nexus-worker.js";
+import { MavenCentralWorker } from "../workers/maven-central-worker.js";
 import { PolicyEngine } from "../engine/policy-engine.js";
 import { DependencyGraphBuilder } from "../engine/dependency-graph.js";
 import { Planner } from "../engine/planner.js";
@@ -21,6 +22,7 @@ import type {
   RemediationTask,
   ChangeRecord,
   ErrorRecord,
+  FailureCode,
 } from "../types/index.js";
 
 const log = createChildLogger("ExecutePlan");
@@ -33,8 +35,17 @@ export async function executePlan(
 }> {
   return withProjectLock(args.projectPath, async () => {
     try {
-      const { projectPath, planId, approvedTasks, dryRun, commit: shouldCommit, createBranch } = args;
-      log.info(`Executing plan ${planId} for: ${projectPath}${dryRun ? ' (DRY RUN)' : ''}`);
+      const {
+        projectPath,
+        planId,
+        approvedTasks,
+        dryRun,
+        commit: shouldCommit,
+        createBranch,
+      } = args;
+      log.info(
+        `Executing plan ${planId} for: ${projectPath}${dryRun ? " (DRY RUN)" : ""}`,
+      );
 
       // Execution limits (spec §39)
       const policyConfig = loadPolicyConfig(projectPath);
@@ -67,12 +78,20 @@ export async function executePlan(
         : null;
 
       const executionId = randomUUID();
-      const execLog = log.withContext({ executionId, planId, project: projectPath });
+      const execLog = log.withContext({
+        executionId,
+        planId,
+        project: projectPath,
+      });
 
       // ── Plan Validation (spec §21) ──────────────────────────────────
       if (plan.projectFingerprint) {
         const currentInfo = await buildProjectInfo(
-          projectPath, pomWorker, mavenWorker, gitWorker, envConfig,
+          projectPath,
+          pomWorker,
+          mavenWorker,
+          gitWorker,
+          envConfig,
         );
         const currentFingerprint = computeProjectFingerprint(
           currentInfo.rootPomContent,
@@ -85,29 +104,36 @@ export async function executePlan(
 
         const reasons: string[] = [];
         if (plan.projectFingerprint !== currentFingerprint) {
-          reasons.push('Project files have changed since plan creation');
+          reasons.push("Project files have changed since plan creation");
         }
         if (plan.gitRevision && plan.gitRevision !== currentInfo.gitRevision) {
           reasons.push(
             `Git revision changed: plan was created at ${plan.gitRevision.slice(0, 8)}, ` +
-            `now at ${currentInfo.gitRevision.slice(0, 8)}`
+              `now at ${currentInfo.gitRevision.slice(0, 8)}`,
           );
         }
         if (plan.policyHash && plan.policyHash !== currentPolicyHash) {
-          reasons.push('Policy configuration has changed since plan creation');
+          reasons.push("Policy configuration has changed since plan creation");
         }
 
         if (reasons.length > 0) {
           return {
-            content: [{
-              type: "text",
-              text: JSON.stringify({
-                error: "PLAN_INVALIDATED",
-                message: "Plan is stale and cannot be executed safely. Run build_plan again.",
-                reasons,
-                planId: plan.id,
-              }, null, 2),
-            }],
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    error: "PLAN_INVALIDATED",
+                    message:
+                      "Plan is stale and cannot be executed safely. Run build_plan again.",
+                    reasons,
+                    planId: plan.id,
+                  },
+                  null,
+                  2,
+                ),
+              },
+            ],
             isError: true,
           };
         }
@@ -128,10 +154,10 @@ export async function executePlan(
       // ── Dry Run Mode (spec §37) ──────────────────────────────────
       if (dryRun) {
         const dryRunResult = {
-          mode: 'dry-run' as const,
+          mode: "dry-run" as const,
           planId: plan.id,
           tasksToExecute: tasksToRun.length,
-          tasks: tasksToRun.map(t => ({
+          tasks: tasksToRun.map((t) => ({
             id: t.id,
             priority: t.priority,
             description: t.description,
@@ -145,7 +171,12 @@ export async function executePlan(
           riskAssessment: plan.riskAssessment,
         };
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(dryRunResult, null, 2) }],
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(dryRunResult, null, 2),
+            },
+          ],
         };
       }
 
@@ -163,7 +194,9 @@ export async function executePlan(
             await gitWorker.createBranch(projectPath, branchName);
             execLog.info(`Created branch: ${branchName}`);
           } catch (error) {
-            execLog.warn(`Could not create branch (continuing on current): ${error}`);
+            execLog.warn(
+              `Could not create branch (continuing on current): ${error}`,
+            );
           }
         }
 
@@ -176,7 +209,9 @@ export async function executePlan(
             pomBackups.set(pomPath, backupPath);
             execLog.info(`POM backup created: ${backupPath}`);
           } catch (error) {
-            execLog.error(`Failed to create POM backup for ${pomPath}: ${error}`);
+            execLog.error(
+              `Failed to create POM backup for ${pomPath}: ${error}`,
+            );
             throw new POMError(
               `Cannot proceed without POM backup for ${pomPath}: ${error instanceof Error ? error.message : String(error)}`,
             );
@@ -204,7 +239,9 @@ export async function executePlan(
 
           // Enforce execution limits (spec §39)
           if (totalBatchesProcessed >= maxBatches) {
-            execLog.warn(`Execution limit reached: max batches (${maxBatches})`);
+            execLog.warn(
+              `Execution limit reached: max batches (${maxBatches})`,
+            );
             errors.push({
               task: "system",
               phase: "execution",
@@ -216,7 +253,9 @@ export async function executePlan(
             break;
           }
           if (mavenFailureCount >= maxMavenFailures) {
-            execLog.warn(`Execution limit reached: max Maven failures (${maxMavenFailures})`);
+            execLog.warn(
+              `Execution limit reached: max Maven failures (${maxMavenFailures})`,
+            );
             errors.push({
               task: "system",
               phase: "execution",
@@ -228,7 +267,9 @@ export async function executePlan(
             break;
           }
           if (totalModifications >= maxModifications) {
-            execLog.warn(`Execution limit reached: max modifications (${maxModifications})`);
+            execLog.warn(
+              `Execution limit reached: max modifications (${maxModifications})`,
+            );
             errors.push({
               task: "system",
               phase: "execution",
@@ -249,7 +290,9 @@ export async function executePlan(
               completedTaskIds.has(dep),
             );
             if (!depsSatisfied) {
-              execLog.warn(`Skipping task ${task.id} — dependencies not satisfied`);
+              execLog.warn(
+                `Skipping task ${task.id} — dependencies not satisfied`,
+              );
               task.status = "skipped";
               tasksSkipped++;
               continue;
@@ -273,12 +316,20 @@ export async function executePlan(
               } else {
                 task.status = "failed";
                 tasksFailed++;
+                const errorCode: FailureCode = taskResult.error?.includes(
+                  "not found in POM",
+                )
+                  ? "VERSION_NOT_AVAILABLE"
+                  : taskResult.error?.includes("exclude-and-replace requires")
+                    ? "INCOMPATIBLE_UPGRADE"
+                    : "UNKNOWN";
                 errors.push({
                   task: task.id,
                   phase: "execution",
                   error: taskResult.error || "Unknown error",
                   rollbackAttempted: false,
                   rollbackSuccess: false,
+                  code: errorCode,
                 });
               }
             } catch (error) {
@@ -292,6 +343,7 @@ export async function executePlan(
                 error: errMsg,
                 rollbackAttempted: false,
                 rollbackSuccess: false,
+                code: "UNKNOWN",
               });
               execLog.error(`Task ${task.id} failed: ${errMsg}`);
             }
@@ -305,9 +357,7 @@ export async function executePlan(
               // Rollback ONLY the POMs modified in THIS batch. Restoring all
               // backups would revert earlier successful batches' changes too,
               // silently losing completed work.
-              const touchedPoms = new Set(
-                batchChanges.map((c) => c.pomPath),
-              );
+              const touchedPoms = new Set(batchChanges.map((c) => c.pomPath));
               let rollbackOk = true;
               for (const pomPath of touchedPoms) {
                 const backupPath = pomBackups.get(pomPath);
@@ -369,42 +419,68 @@ export async function executePlan(
             batchIndex < currentPlan.batches.length - 1 // not the last batch
           ) {
             try {
-              const postBatchReport = await iqWorker.scanAndGetReport(envConfig.iqAppId);
-              const remainingVulns = postBatchReport.components.filter(c =>
-                c.vulnerabilities.some(v =>
-                  currentPlan.policyUsed.severity.includes(v.severity)
-                )
+              const postBatchReport = await iqWorker.scanAndGetReport(
+                envConfig.iqAppId,
+              );
+              const remainingVulns = postBatchReport.components.filter((c) =>
+                c.vulnerabilities.some((v) =>
+                  currentPlan.policyUsed.severity.includes(v.severity),
+                ),
               );
 
               // Compare vulnerability counts, not task counts — a single task
               // may fix multiple vulnerabilities, and a component may have vulns
               // outside the current plan's scope.
-              const preBatchVulnCount = currentPlan.vulnerabilitiesBySeverity.total;
+              const preBatchVulnCount =
+                currentPlan.vulnerabilitiesBySeverity.total;
               if (remainingVulns.length < preBatchVulnCount) {
                 execLog.info(
                   `Replan #${replanCount + 1}: ${remainingVulns.length} components remaining ` +
-                  `(${tasksToRun.length - tasksCompleted} tasks left in current plan)`
+                    `(${tasksToRun.length - tasksCompleted} tasks left in current plan)`,
                 );
 
                 // Rebuild graph and replan
                 const graphBuilder = new DependencyGraphBuilder();
-                const treeOutput = await mavenWorker.getDependencyTree(projectPath);
+                const treeOutput =
+                  await mavenWorker.getDependencyTree(projectPath);
                 graphBuilder.buildFromMavenTree(treeOutput);
                 const projectInfo = await buildProjectInfo(
-                  projectPath, pomWorker, mavenWorker, gitWorker, envConfig,
+                  projectPath,
+                  pomWorker,
+                  mavenWorker,
+                  gitWorker,
+                  envConfig,
                 );
                 graphBuilder.markSpringBootManaged(projectInfo);
-                graphBuilder.markDependencyManagement(projectInfo.dependencyManagement);
+                graphBuilder.markDependencyManagement(
+                  projectInfo.dependencyManagement,
+                );
                 graphBuilder.markVulnerableComponents(postBatchReport);
 
                 const policyEngine = new PolicyEngine(currentPlan.policyUsed);
                 const nexusWorker = envConfig.nexusUsername
-                  ? new NexusWorker(envConfig.nexusUrl, envConfig.nexusUsername, envConfig.nexusPassword)
+                  ? new NexusWorker(
+                      envConfig.nexusUrl,
+                      envConfig.nexusUsername,
+                      envConfig.nexusPassword,
+                    )
                   : null;
-                const planner = new Planner(policyEngine, graphBuilder, nexusWorker);
+                const planner = new Planner(
+                  policyEngine,
+                  graphBuilder,
+                  nexusWorker,
+                  new MavenCentralWorker(),
+                );
 
-                const filteredComponents = policyEngine.filterComponentsByPolicy(postBatchReport.components);
-                const newPlan = await planner.createPlan(filteredComponents, envConfig.iqAppId, projectInfo);
+                const filteredComponents =
+                  policyEngine.filterComponentsByPolicy(
+                    postBatchReport.components,
+                  );
+                const newPlan = await planner.createPlan(
+                  filteredComponents,
+                  envConfig.iqAppId,
+                  projectInfo,
+                );
 
                 // Set lineage
                 newPlan.previousPlanId = currentPlan.id;
@@ -425,8 +501,10 @@ export async function executePlan(
                 // identity (groupId:artifactId) instead of task ID.
                 const completedComponents = new Set(
                   currentPlan.tasks
-                    .filter(t => completedTaskIds.has(t.id))
-                    .map(t => `${t.component.groupId}:${t.component.artifactId}`)
+                    .filter((t) => completedTaskIds.has(t.id))
+                    .map(
+                      (t) => `${t.component.groupId}:${t.component.artifactId}`,
+                    ),
                 );
                 for (const newTask of newPlan.tasks) {
                   const key = `${newTask.component.groupId}:${newTask.component.artifactId}`;
@@ -437,10 +515,14 @@ export async function executePlan(
 
                 currentPlan = newPlan;
                 replanCount++;
-                execLog.info(`Replan complete: new plan has ${newPlan.tasks.length} tasks in ${newPlan.batches.length} batches`);
+                execLog.info(
+                  `Replan complete: new plan has ${newPlan.tasks.length} tasks in ${newPlan.batches.length} batches`,
+                );
               }
             } catch (error) {
-              execLog.warn(`Replan failed (continuing with current plan): ${error}`);
+              execLog.warn(
+                `Replan failed (continuing with current plan): ${error}`,
+              );
             }
           }
 
@@ -461,24 +543,35 @@ export async function executePlan(
             execLog.warn(`Could not commit changes: ${error}`);
           }
         } else if (changes.length > 0) {
-          execLog.info(`Changes applied but not committed (commit flag not set)`);
+          execLog.info(
+            `Changes applied but not committed (commit flag not set)`,
+          );
         }
 
         // Run IQ scan to count remaining vulnerabilities
         let vulnerabilitiesAfter = 0;
         let iqScanSuccess = true;
         const vulnerabilitiesBySeverityAfter = {
-          total: 0, critical: 0, high: 0, medium: 0, low: 0,
+          total: 0,
+          critical: 0,
+          high: 0,
+          medium: 0,
+          low: 0,
         };
         if (iqWorker) {
           try {
             const iqReport = await iqWorker.scanAndGetReport(envConfig.iqAppId);
             vulnerabilitiesAfter = iqReport.totalVulnerabilities;
-            vulnerabilitiesBySeverityAfter.total = iqReport.totalVulnerabilities;
-            vulnerabilitiesBySeverityAfter.critical = iqReport.vulnerabilitiesBySeverity.CRITICAL;
-            vulnerabilitiesBySeverityAfter.high = iqReport.vulnerabilitiesBySeverity.HIGH;
-            vulnerabilitiesBySeverityAfter.medium = iqReport.vulnerabilitiesBySeverity.MEDIUM;
-            vulnerabilitiesBySeverityAfter.low = iqReport.vulnerabilitiesBySeverity.LOW;
+            vulnerabilitiesBySeverityAfter.total =
+              iqReport.totalVulnerabilities;
+            vulnerabilitiesBySeverityAfter.critical =
+              iqReport.vulnerabilitiesBySeverity.CRITICAL;
+            vulnerabilitiesBySeverityAfter.high =
+              iqReport.vulnerabilitiesBySeverity.HIGH;
+            vulnerabilitiesBySeverityAfter.medium =
+              iqReport.vulnerabilitiesBySeverity.MEDIUM;
+            vulnerabilitiesBySeverityAfter.low =
+              iqReport.vulnerabilitiesBySeverity.LOW;
           } catch (error) {
             execLog.warn(`IQ rescan failed: ${error}`);
             iqScanSuccess = false;
@@ -541,7 +634,13 @@ export async function executePlan(
         }
 
         const completedAt = new Date().toISOString();
-        const emptySeverity = { total: 0, critical: 0, high: 0, medium: 0, low: 0 };
+        const emptySeverity = {
+          total: 0,
+          critical: 0,
+          high: 0,
+          medium: 0,
+          low: 0,
+        };
         const result: ExecutionResult = {
           executionId,
           planId,
@@ -663,14 +762,18 @@ async function executeRemediationTask(
         return {
           success: false,
           changes: [],
-          error: "exclude-and-replace requires ownerGroupId and ownerArtifactId in task metadata",
+          error:
+            "exclude-and-replace requires ownerGroupId and ownerArtifactId in task metadata",
         };
       }
 
       // Step 1: Add exclusion to the owning dependency
       const excluded = pomWorker.addExclusion(
-        pomData, ownerG, ownerA,
-        component.groupId, component.artifactId,
+        pomData,
+        ownerG,
+        ownerA,
+        component.groupId,
+        component.artifactId,
       );
 
       // Step 2: Add replacement dependency at the safe version

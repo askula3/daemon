@@ -8,6 +8,7 @@ import { MavenWorker } from "../workers/maven-worker.js";
 import { GitWorker } from "../workers/git-worker.js";
 import { IQWorker } from "../workers/iq-worker.js";
 import { NexusWorker } from "../workers/nexus-worker.js";
+import { MavenCentralWorker } from "../workers/maven-central-worker.js";
 import { PolicyEngine } from "../engine/policy-engine.js";
 import { DependencyGraphBuilder } from "../engine/dependency-graph.js";
 import { Planner } from "../engine/planner.js";
@@ -65,10 +66,16 @@ export async function buildPlan(
             envConfig.nexusPassword,
           )
         : null;
+      // Maven Central is always available as a free public fallback
+      const mavenCentralWorker = new MavenCentralWorker();
 
       // Get project info using shared helper
       const projectInfo = await buildProjectInfo(
-        projectPath, pomWorker, mavenWorker, gitWorker, envConfig,
+        projectPath,
+        pomWorker,
+        mavenWorker,
+        gitWorker,
+        envConfig,
       );
 
       // Get dependency tree
@@ -94,8 +101,13 @@ export async function buildPlan(
       // Create policy engine
       const policyEngine = new PolicyEngine(policyConfig);
 
-      // Create planner with Nexus worker for version lookups
-      const planner = new Planner(policyEngine, graphBuilder, nexusWorker);
+      // Create planner — IQ suggestions > Nexus > Maven Central fallback
+      const planner = new Planner(
+        policyEngine,
+        graphBuilder,
+        nexusWorker,
+        mavenCentralWorker,
+      );
 
       // Get vulnerable components
       const vulnerableComponents = iqReport
@@ -103,7 +115,11 @@ export async function buildPlan(
         : [];
 
       // Create plan
-      const plan = await planner.createPlan(vulnerableComponents, envConfig.iqAppId, projectInfo);
+      const plan = await planner.createPlan(
+        vulnerableComponents,
+        envConfig.iqAppId,
+        projectInfo,
+      );
 
       // Add plan immutability fields (spec §21)
       plan.gitRevision = projectInfo.gitRevision;
@@ -112,16 +128,34 @@ export async function buildPlan(
         projectInfo.modules,
         projectInfo.dependencyManagement,
       );
-      plan.policyHash = computePolicyHash(policyConfig as unknown as Record<string, unknown>);
+      plan.policyHash = computePolicyHash(
+        policyConfig as unknown as Record<string, unknown>,
+      );
 
       // Persist plan so execute_plan can look it up by ID
       planStore.savePlan(plan);
+
+      // Capability warnings
+      const warnings: string[] = [];
+      if (!iqWorker) {
+        warnings.push(
+          "No IQ Server configured (IQ_SERVER_TOKEN not set) — vulnerability scanning disabled. " +
+            "The plan is based on dependency tree analysis only. Set IQ_SERVER_TOKEN and IQ_APP_ID to enable vulnerability detection.",
+        );
+      }
+      if (!nexusWorker) {
+        warnings.push(
+          "No Nexus Repository configured (NEXUS_USERNAME not set) — using Maven Central for version resolution.",
+        );
+      }
+
+      const response = warnings.length > 0 ? { ...plan, warnings } : plan;
 
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(plan, null, 2),
+            text: JSON.stringify(response, null, 2),
           },
         ],
       };

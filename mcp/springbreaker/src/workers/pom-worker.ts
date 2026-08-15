@@ -214,9 +214,9 @@ export class POMWorker {
     >;
     if (!dependencyManagement) return [];
 
-    const dependencies = (dependencyManagement.dependencies as Record<string, unknown>)?.dependency as Array<
-      Record<string, unknown>
-    >;
+    const dependencies = (
+      dependencyManagement.dependencies as Record<string, unknown>
+    )?.dependency as Array<Record<string, unknown>>;
     if (!dependencies) return [];
 
     return dependencies.map((dep) => ({
@@ -338,8 +338,12 @@ export class POMWorker {
 
     // Check in dependencyManagement (versions may be managed centrally)
     const depMgmt = project.dependencyManagement as Record<string, unknown>;
-    const depMgmtInner = depMgmt?.dependencies as Record<string, unknown> | undefined;
-    const managedDeps = depMgmtInner?.dependency as Array<Record<string, unknown>> | undefined;
+    const depMgmtInner = depMgmt?.dependencies as
+      | Record<string, unknown>
+      | undefined;
+    const managedDeps = depMgmtInner?.dependency as
+      | Array<Record<string, unknown>>
+      | undefined;
     if (managedDeps) {
       for (const dep of managedDeps) {
         if (this.matchesDependency(dep, groupId, artifactId)) {
@@ -502,7 +506,9 @@ export class POMWorker {
       depsWrapper.dependency = [];
     }
 
-    const dependencies = depsWrapper.dependency as Array<Record<string, unknown>>;
+    const dependencies = depsWrapper.dependency as Array<
+      Record<string, unknown>
+    >;
     dependencies.push({
       groupId,
       artifactId,
@@ -511,35 +517,6 @@ export class POMWorker {
     });
 
     log.info(`Added dependency ${groupId}:${artifactId}:${version}`);
-  }
-
-  // Check if a dependency is used (has actual imports in code)
-  async isDependencyUsed(
-    pomData: Record<string, unknown>,
-    groupId: string,
-    artifactId: string,
-  ): Promise<boolean> {
-    // This is a heuristic - in production, we'd use mvn dependency:analyze
-    // For now, check if it's marked as provided or test scope
-    const project = (pomData.project as Record<string, unknown>) || {};
-    const dependencies = this.getDependencyArray(project);
-
-    if (!dependencies) return false;
-
-    const dep = dependencies.find((d) =>
-      this.matchesDependency(d, groupId, artifactId),
-    );
-    if (!dep) return false;
-
-    const scope = this.extractValue(dep, "scope") || "compile";
-    const optional = this.extractValue(dep, "optional") === "true";
-
-    // Test and provided dependencies are often optional
-    if (scope === "test" || scope === "provided" || optional) {
-      return false; // May be unused, needs verification
-    }
-
-    return true; // Assume used for compile/runtime scope
   }
 
   // Helper to match a dependency

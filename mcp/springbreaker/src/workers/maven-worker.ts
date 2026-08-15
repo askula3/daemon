@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
 import { existsSync, chmodSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createChildLogger } from "../utils/logger.js";
 import { MavenError } from "../utils/errors.js";
@@ -176,123 +175,12 @@ export class MavenWorker {
     return result.stdout;
   }
 
-  // Get dependency tree as JSON
-  async getDependencyTreeJson(
-    projectPath: string,
-  ): Promise<Record<string, unknown>> {
-    const result = await this.execute(projectPath, ["dependency:tree"], {
-      properties: {
-        outputType: "json",
-        outputFile: "target/dependency-tree.json",
-      },
-    });
-
-    if (!result.success) {
-      throw new MavenError(
-        `Failed to get dependency tree JSON: ${result.stderr}`,
-      );
-    }
-
-    // Read the output file (truly async)
-    const outputPath = join(projectPath, "target", "dependency-tree.json");
-
-    if (existsSync(outputPath)) {
-      const content = await readFile(outputPath, "utf-8");
-      return JSON.parse(content);
-    }
-
-    throw new MavenError("Dependency tree output file not found");
-  }
-
-  // Analyze dependencies (used vs unused)
-  async analyzeDependencies(projectPath: string): Promise<{
-    used: string[];
-    unused: string[];
-    possiblyUsed: string[];
-  }> {
-    const result = await this.execute(projectPath, ["dependency:analyze"], {
-      skipTests: true,
-    });
-
-    if (!result.success) {
-      throw new MavenError(`Failed to analyze dependencies: ${result.stderr}`);
-    }
-
-    const used: string[] = [];
-    const unused: string[] = [];
-    const possiblyUsed: string[] = [];
-
-    // Parse the output
-    const lines = result.stdout.split("\n");
-    let section = "";
-
-    for (const line of lines) {
-      if (line.includes("Used declared dependencies")) {
-        section = "used";
-      } else if (line.includes("Unused declared dependencies")) {
-        section = "unused";
-      } else if (line.includes("Possibly used declared dependencies")) {
-        section = "possibly";
-      } else if (line.match(/^\s+[a-z]/)) {
-        const dep = line.trim().split(" ")[0];
-        if (dep) {
-          if (section === "used") used.push(dep);
-          else if (section === "unused") unused.push(dep);
-          else if (section === "possibly") possiblyUsed.push(dep);
-        }
-      }
-    }
-
-    return { used, unused, possiblyUsed };
-  }
-
   // Run clean verify
   async cleanVerify(
     projectPath: string,
     skipTests: boolean = false,
   ): Promise<MavenResult> {
     return this.execute(projectPath, ["clean", "verify"], { skipTests });
-  }
-
-  // Run compile only (faster than verify)
-  async compile(projectPath: string): Promise<MavenResult> {
-    return this.execute(projectPath, ["compile"]);
-  }
-
-  // Validate Maven project
-  async validate(projectPath: string): Promise<MavenResult> {
-    return this.execute(projectPath, ["validate"]);
-  }
-
-  // Get effective POM
-  async getEffectivePom(projectPath: string, output?: string): Promise<string> {
-    const properties: Record<string, string> = {};
-    if (output) {
-      properties.outputFile = output;
-    }
-
-    const result = await this.execute(projectPath, ["help:effective-pom"], {
-      properties,
-    });
-
-    if (!result.success) {
-      throw new MavenError(`Failed to get effective POM: ${result.stderr}`);
-    }
-
-    return result.stdout;
-  }
-
-  // Get project version
-  async getProjectVersion(projectPath: string): Promise<string> {
-    const result = await this.execute(projectPath, ["help:evaluate"], {
-      properties: { expression: "project.version", q: "true" },
-    });
-
-    if (!result.success) {
-      throw new MavenError(`Failed to get project version: ${result.stderr}`);
-    }
-
-    return result.stdout.trim();
   }
 
   // Check if Maven is available

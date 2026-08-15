@@ -291,19 +291,6 @@ describe("Planner", () => {
     });
   });
 
-  describe("replan lineage", () => {
-    it("sets previousPlanId when replanning", async () => {
-      const components = [makeComponent()];
-      const originalPlan = await planner.createPlan(components, "test-project");
-
-      // Create a replanned plan
-      const newPlan = await planner.replan(originalPlan, [], components);
-
-      expect(newPlan.id).not.toBe(originalPlan.id);
-      expect(newPlan.previousPlanId).toBe(originalPlan.id);
-    });
-  });
-
   describe("validatePlan", () => {
     it("returns no errors for a valid plan", async () => {
       const components = [makeComponent()];
@@ -324,9 +311,19 @@ describe("Planner", () => {
             status: "pending",
             priority: "upgrade-direct-dependency",
             description: "task a",
-            component: { groupId: "g", artifactId: "a", currentVersion: "1", targetVersion: "2" },
-            reason: "", expectedFixes: [], confidence: "medium", risk: "low",
-            preconditions: [], verification: [], rollbackSteps: [],
+            component: {
+              groupId: "g",
+              artifactId: "a",
+              currentVersion: "1",
+              targetVersion: "2",
+            },
+            reason: "",
+            expectedFixes: [],
+            confidence: "medium",
+            risk: "low",
+            preconditions: [],
+            verification: [],
+            rollbackSteps: [],
           },
           {
             id: "b",
@@ -334,9 +331,19 @@ describe("Planner", () => {
             status: "pending",
             priority: "upgrade-direct-dependency",
             description: "task b",
-            component: { groupId: "g", artifactId: "b", currentVersion: "1", targetVersion: "2" },
-            reason: "", expectedFixes: [], confidence: "medium", risk: "low",
-            preconditions: [], verification: [], rollbackSteps: [],
+            component: {
+              groupId: "g",
+              artifactId: "b",
+              currentVersion: "1",
+              targetVersion: "2",
+            },
+            reason: "",
+            expectedFixes: [],
+            confidence: "medium",
+            risk: "low",
+            preconditions: [],
+            verification: [],
+            rollbackSteps: [],
           },
         ],
         batches: [],
@@ -345,8 +352,16 @@ describe("Planner", () => {
         summary: "",
         createdAt: "",
         policyUsed: DEFAULT_POLICY,
-        vulnerabilitiesBySeverity: { total: 0, critical: 0, high: 0, medium: 0, low: 0 },
-        gitRevision: "", projectFingerprint: "", policyHash: "",
+        vulnerabilitiesBySeverity: {
+          total: 0,
+          critical: 0,
+          high: 0,
+          medium: 0,
+          low: 0,
+        },
+        gitRevision: "",
+        projectFingerprint: "",
+        policyHash: "",
       };
 
       const errors = planner.validatePlan(plan);
@@ -365,9 +380,19 @@ describe("Planner", () => {
             status: "pending",
             priority: "upgrade-direct-dependency",
             description: "task a",
-            component: { groupId: "g", artifactId: "a", currentVersion: "1", targetVersion: "2" },
-            reason: "", expectedFixes: [], confidence: "medium", risk: "low",
-            preconditions: [], verification: [], rollbackSteps: [],
+            component: {
+              groupId: "g",
+              artifactId: "a",
+              currentVersion: "1",
+              targetVersion: "2",
+            },
+            reason: "",
+            expectedFixes: [],
+            confidence: "medium",
+            risk: "low",
+            preconditions: [],
+            verification: [],
+            rollbackSteps: [],
           },
         ],
         batches: [],
@@ -376,8 +401,16 @@ describe("Planner", () => {
         summary: "",
         createdAt: "",
         policyUsed: DEFAULT_POLICY,
-        vulnerabilitiesBySeverity: { total: 0, critical: 0, high: 0, medium: 0, low: 0 },
-        gitRevision: "", projectFingerprint: "", policyHash: "",
+        vulnerabilitiesBySeverity: {
+          total: 0,
+          critical: 0,
+          high: 0,
+          medium: 0,
+          low: 0,
+        },
+        gitRevision: "",
+        projectFingerprint: "",
+        policyHash: "",
       };
 
       const errors = planner.validatePlan(plan);
@@ -401,7 +434,11 @@ describe("Planner", () => {
           artifactId: "lib",
           version: "1.0.0",
           vulnerabilities: [
-            makeVuln({ id: "CVE-2024-001", suggestedVersion: "1.0.1", fixVersions: ["1.0.1"] }),
+            makeVuln({
+              id: "CVE-2024-001",
+              suggestedVersion: "1.0.1",
+              fixVersions: ["1.0.1"],
+            }),
           ],
         }),
       ];
@@ -554,7 +591,7 @@ describe("Planner", () => {
       ];
 
       const plan = await planner.createPlan(components, "test-project");
-      const taskIds = new Set(plan.tasks.map(t => t.id));
+      const taskIds = new Set(plan.tasks.map((t) => t.id));
 
       for (const task of plan.tasks) {
         for (const dep of task.dependencies) {
@@ -628,7 +665,7 @@ describe("Planner", () => {
       ];
 
       const plan = await planner.createPlan(components, "test-project");
-      const ids = plan.tasks.map(t => t.id);
+      const ids = plan.tasks.map((t) => t.id);
       expect(new Set(ids).size).toBe(ids.length);
     });
 
@@ -658,7 +695,7 @@ describe("Planner", () => {
 
       // All tasks in the same batch should have no inter-dependencies
       for (const batch of plan.batches) {
-        const batchIds = new Set(batch.map(t => t.id));
+        const batchIds = new Set(batch.map((t) => t.id));
         for (const task of batch) {
           for (const dep of task.dependencies) {
             // Dependency must NOT be in the same batch (otherwise it's not parallelizable)

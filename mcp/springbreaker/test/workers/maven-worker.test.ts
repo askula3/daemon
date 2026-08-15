@@ -135,35 +135,5 @@ describe("MavenWorker", () => {
         skipTests: true,
       });
     });
-
-    it("compile calls execute with compile goal", async () => {
-      const spy = vi.spyOn(worker, "execute");
-      spy.mockResolvedValueOnce({
-        exitCode: 0,
-        stdout: "",
-        stderr: "",
-        duration: 100,
-        success: true,
-      });
-
-      await worker.compile("/project");
-
-      expect(spy).toHaveBeenCalledWith("/project", ["compile"]);
-    });
-
-    it("validate calls execute with validate goal", async () => {
-      const spy = vi.spyOn(worker, "execute");
-      spy.mockResolvedValueOnce({
-        exitCode: 0,
-        stdout: "",
-        stderr: "",
-        duration: 100,
-        success: true,
-      });
-
-      await worker.validate("/project");
-
-      expect(spy).toHaveBeenCalledWith("/project", ["validate"]);
-    });
   });
 });
