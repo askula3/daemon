@@ -162,6 +162,12 @@ export class PolicyEngine {
       },
       reason: this.generateReason(priority, component, targetVersion),
       expectedFixes: vulnerabilityIds,
+      expectedVulnerabilities: component.vulnerabilities.map((vulnerability) => ({
+        groupId: component.groupId,
+        artifactId: component.artifactId,
+        version: component.version,
+        vulnerabilityId: vulnerability.id,
+      })),
       confidence,
       risk,
       preconditions: this.getPreconditions(priority),

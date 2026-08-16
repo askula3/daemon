@@ -3,14 +3,12 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { logger } from "./utils/logger.js";
-import type { LogLevel } from "./utils/logger.js";
 import { tools } from "./tools/index.js";
-
-// Apply LOG_LEVEL from environment at startup (spec §41)
-const envLogLevel = process.env.LOG_LEVEL?.toLowerCase() as LogLevel | undefined;
-if (envLogLevel && ['debug', 'info', 'warn', 'error'].includes(envLogLevel)) {
-  logger.setLevel(envLogLevel);
-}
+import { z } from "zod";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
+import { loadEnvConfig } from "./config.js";
+import { handleToolError } from "./utils/errors.js";
 
 // Create MCP server
 const server = new McpServer(
@@ -21,43 +19,129 @@ const server = new McpServer(
   {
     capabilities: {
       tools: {},
-      logging: {},
     },
+    instructions:
+      "SpringBreaker deterministically remediates Spring Boot Maven vulnerabilities. " +
+      "Use inspect_project first, build_plan second, review and approve task IDs, then call execute_plan. " +
+      "Use verify for an independent final check and summarize for the stored audit summary. " +
+      "execute_plan edits POM files; branch and commit remain opt-in.",
   },
 );
 
+const ToolEnvelopeSchema = z.object({
+  ok: z.boolean(),
+  data: z.record(z.unknown()).optional(),
+  error: z.record(z.unknown()).optional(),
+});
+
 // Register all tools with type-safe handlers
 for (const tool of tools) {
-  server.tool(
+  server.registerTool(
     tool.name,
-    tool.description,
-    tool.inputSchema.shape,
-    async (args: Record<string, unknown>) => {
+    {
+      title: tool.title,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      outputSchema: ToolEnvelopeSchema,
+      annotations: tool.annotations,
+    },
+    async (
+      args: Record<string, unknown>,
+      extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+    ) => {
       logger.info(`Tool called: ${tool.name}`);
+      const progressToken = extra._meta?.progressToken;
+      if (progressToken !== undefined) {
+        await extra.sendNotification({
+          method: "notifications/progress",
+          params: { progressToken, progress: 0, total: 100, message: `Starting ${tool.name}` },
+        });
+      }
       // Parse and validate args through the schema for type safety
       const parsed = tool.inputSchema.safeParse(args);
       if (!parsed.success) {
+        const error = {
+          error: "VALIDATION_ERROR",
+          message: parsed.error.message,
+          issues: parsed.error.issues,
+        };
+        const envelope = { ok: false, error };
+        if (progressToken !== undefined) {
+          await extra.sendNotification({
+            method: "notifications/progress",
+            params: { progressToken, progress: 100, total: 100, message: `Rejected ${tool.name}` },
+          });
+        }
         return {
           isError: true,
+          structuredContent: envelope,
           content: [{
             type: "text" as const,
-            text: JSON.stringify({
-              error: "VALIDATION_ERROR",
-              message: parsed.error.message,
-              issues: parsed.error.issues,
-            }, null, 2),
+            text: JSON.stringify(envelope, null, 2),
           }],
         };
       }
       // Use type assertion — the schema guarantees the shape matches the handler
-      const result = await tool.handler(parsed.data as never);
-      return result;
+      let result: {
+        content: { type: "text"; text: string }[];
+        isError?: boolean;
+      };
+      try {
+        result = await tool.handler(parsed.data as never, {
+          signal: extra.signal,
+          progress: progressToken === undefined
+            ? undefined
+            : async (progress, total, message) => {
+                await extra.sendNotification({
+                  method: "notifications/progress",
+                  params: {
+                    progressToken,
+                    progress: Math.min(90, Math.round((progress / Math.max(total, 1)) * 90)),
+                    total: 100,
+                    message,
+                  },
+                });
+              },
+        });
+      } catch (error) {
+        // Defense in depth: individual tools normalize errors, but an
+        // unexpected exception must never tear down the long-running server.
+        result = handleToolError(error);
+      }
+      let payload: Record<string, unknown>;
+      let isError = result.isError === true;
+      try {
+        payload = JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown>;
+      } catch {
+        payload = {
+          error: "INVALID_TOOL_RESPONSE",
+          message: `${tool.name} returned a non-JSON response`,
+          recoverable: false,
+        };
+        isError = true;
+      }
+      const envelope = isError
+        ? { ok: false, error: payload }
+        : { ok: true, data: payload };
+      if (progressToken !== undefined) {
+        await extra.sendNotification({
+          method: "notifications/progress",
+          params: { progressToken, progress: 100, total: 100, message: `Completed ${tool.name}` },
+        });
+      }
+      return {
+        ...result,
+        structuredContent: envelope,
+        content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
+      };
     },
   );
 }
 
 // Start server
 async function main() {
+  // Apply trusted process/package configuration before emitting startup logs.
+  logger.setLevel(loadEnvConfig().logLevel);
   logger.info("⚡ Starting SpringBreaker MCP Server");
 
   const transport = new StdioServerTransport();
@@ -84,6 +168,7 @@ function setupShutdownHandlers() {
 
 setupShutdownHandlers();
 main().catch((error) => {
-  logger.error("Failed to start MCP server:", error);
+  const message = error instanceof Error ? error.message : String(error);
+  logger.error(`Failed to start MCP server: ${message}`);
   process.exit(1);
 });

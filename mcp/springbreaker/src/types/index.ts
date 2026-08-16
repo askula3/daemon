@@ -50,14 +50,30 @@ export interface ProjectInfo {
   applicationId: string;
   rootPomPath: string;
   rootPomContent: string;
+  /** Canonical project files included in stale-plan detection. */
+  fingerprintFiles: Record<string, string>;
   modules: string[];
   javaVersion: string;
   springBootVersion: string | null;
+  springBootVersionSource: "parent" | "property" | "dependency-management" | null;
+  springBootVersionProperty: string | null;
   springBootParentVersion: string | null;
   parentGroupId: string | null;
   parentArtifactId: string | null;
   parentVersion: string | null;
   dependencyManagement: DependencyManagementEntry[];
+  dependencyDeclarations: Array<{
+    groupId: string;
+    artifactId: string;
+    pomPath: string;
+    kind: "dependency" | "dependency-management";
+  }>;
+  /** Direct declarations proven unused by Maven dependency:analyze, scoped to a POM. */
+  unusedDependencyDeclarations?: Array<{
+    groupId: string;
+    artifactId: string;
+    pomPath: string;
+  }>;
   capabilities: ProjectCapabilities;
   timestamp: string;
 }
@@ -150,6 +166,8 @@ export interface RemediationTask {
   };
   reason: string;
   expectedFixes: string[]; // vulnerability IDs that will be fixed
+  /** Exact pre-change component occurrences expected to disappear after this task. */
+  expectedVulnerabilities: VulnerabilityOccurrence[];
   confidence: "high" | "medium" | "low";
   risk: "low" | "medium" | "high";
   preconditions: string[];
@@ -166,10 +184,19 @@ export interface RemediationTask {
   };
 }
 
+export interface VulnerabilityOccurrence {
+  groupId: string;
+  artifactId: string;
+  version: string;
+  vulnerabilityId: string;
+}
+
 // Execution plan (DAG)
 export interface ExecutionPlan {
   id: string;
   projectId: string;
+  /** Canonical project directory the plan was built for. */
+  projectPath: string;
   previousPlanId?: string; // Set during replan — tracks lineage for audit
   tasks: RemediationTask[];
   batches: RemediationTask[][]; // tasks grouped by dependency level
@@ -179,10 +206,20 @@ export interface ExecutionPlan {
   createdAt: string;
   policyUsed: PolicyConfig;
   vulnerabilitiesBySeverity: SummaryCount; // severity breakdown from IQ report
+  vulnerabilityIds: string[];
+  vulnerabilityOccurrences: VulnerabilityOccurrence[];
+  planningIssues: Array<{
+    groupId: string;
+    artifactId: string;
+    vulnerabilityIds: string[];
+    reason: string;
+  }>;
   // Plan immutability fields (spec §21)
   gitRevision: string; // Git HEAD at plan creation time
   projectFingerprint: string; // SHA-256 of key project files
   policyHash: string; // SHA-256 of serialized PolicyConfig
+  /** SHA-256 binding to non-secret IQ/Nexus endpoint and application identity. */
+  serviceConfigHash?: string;
 }
 
 // Policy configuration
@@ -219,7 +256,11 @@ export interface EnvConfig {
   nexusPassword: string;
   preferMvnw: boolean;
   mavenOpts?: string;
-  logLevel: string;
+  logLevel: "debug" | "info" | "warn" | "error";
+  /** Explicit environment variables allowed through to Maven child processes. */
+  mavenEnvAllowlist: string[];
+  /** Permit non-loopback HTTP endpoints. HTTPS is required by default. */
+  allowInsecureHttp: boolean;
 }
 
 // Execution results
@@ -233,7 +274,9 @@ export interface ExecutionResult {
   tasksFailed: number;
   tasksSkipped: number;
   buildSuccess: boolean;
+  buildVerified: boolean;
   iqScanSuccess: boolean;
+  iqVerified: boolean;
   vulnerabilitiesBefore: number;
   vulnerabilitiesAfter: number;
   vulnerabilitiesResolved: number;
@@ -242,6 +285,8 @@ export interface ExecutionResult {
   vulnerabilitiesBySeverityAfter: SummaryCount;
   changes: ChangeRecord[];
   errors: ErrorRecord[];
+  /** Fresh immutable plan requiring approval when adaptive replanning changed an action. */
+  continuationPlanId?: string;
 }
 
 // Change record for a single modification
@@ -275,6 +320,7 @@ export type FailureCode =
   | "NEXUS_UNAVAILABLE"
   | "PROJECT_CHANGED"
   | "PLAN_INVALID"
+  | "APPROVAL_REQUIRED"
   | "UNKNOWN";
 
 // Summary count by severity
@@ -321,6 +367,7 @@ export interface ExecutionState {
 export interface IPlanStore {
   savePlan(plan: ExecutionPlan): void;
   getPlan(planId: string): ExecutionPlan | undefined;
+  claimPlan(planId: string): boolean;
   saveExecution(state: ExecutionState): void;
   getExecution(executionId: string): ExecutionState | undefined;
   listExecutions(): ExecutionState[];

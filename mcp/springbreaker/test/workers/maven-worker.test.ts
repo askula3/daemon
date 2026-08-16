@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { MavenWorker } from "../../src/workers/maven-worker.js";
+import { EventEmitter } from "node:events";
+import { MavenWorker, parseUnusedDeclaredDependencies } from "../../src/workers/maven-worker.js";
 
 // We can't easily test spawn() without mocking child_process, but we can
 // test the argument building logic by extracting it. For now, test the
@@ -7,7 +8,6 @@ import { MavenWorker } from "../../src/workers/maven-worker.js";
 
 vi.mock("node:child_process", () => ({
   spawn: vi.fn(() => {
-    const EventEmitter = require("events");
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
@@ -26,6 +26,7 @@ vi.mock("node:fs", async () => {
   return {
     ...actual,
     existsSync: vi.fn(() => true),
+    accessSync: vi.fn(),
     chmodSync: vi.fn(),
   };
 });
@@ -119,6 +120,18 @@ describe("MavenWorker", () => {
   });
 
   describe("convenience methods", () => {
+    it("parses only Maven's explicit unused-dependency section", () => {
+      expect(parseUnusedDeclaredDependencies(`[WARNING] Used undeclared dependencies found:
+[WARNING] org.example:used:jar:1.0.0:compile
+[WARNING] Unused declared dependencies found:
+[WARNING] org.example:unused:jar:1.0.0:compile
+[WARNING] org.example:classified:jar:tests:1.0.0:test
+[INFO] BUILD SUCCESS`)).toEqual([
+        { groupId: "org.example", artifactId: "unused" },
+        { groupId: "org.example", artifactId: "classified" },
+      ]);
+    });
+
     it("cleanVerify calls execute with correct goals", async () => {
       const spy = vi.spyOn(worker, "execute");
       spy.mockResolvedValueOnce({

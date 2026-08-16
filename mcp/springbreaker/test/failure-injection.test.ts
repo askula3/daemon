@@ -8,14 +8,15 @@
  * - Malformed POM
  * - No fix available / policy blocked
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { writeFile, unlink, mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { withRetry, isRetryableHttpStatus } from "../src/utils/retry.js";
 import {
-  MCPError,
   IQServerError,
   NexusError,
   MavenError,
-  POMError,
   handleToolError,
 } from "../src/utils/errors.js";
 import { POMWorker } from "../src/workers/pom-worker.js";
@@ -179,9 +180,7 @@ describe("failure injection: withRetry", () => {
 describe("failure injection: POM worker", () => {
   it("throws POMError on malformed XML", async () => {
     const worker = new POMWorker();
-    const tmpDir = await import("node:os").then((os) => os.tmpdir());
-    const { join } = await import("node:path");
-    const { writeFile, unlink, mkdir } = await import("node:fs/promises");
+    const tmpDir = tmpdir();
 
     const badPomDir = join(tmpDir, `springbreaker-test-${Date.now()}`);
     const badPomPath = join(badPomDir, "pom.xml");
@@ -190,10 +189,7 @@ describe("failure injection: POM worker", () => {
       await mkdir(badPomDir, { recursive: true });
       await writeFile(badPomPath, "this is not valid XML <<<>>>", "utf-8");
 
-      // readPom should parse without throwing (fast-xml-parser is lenient)
-      // but the result will be an unusual object structure
-      const result = await worker.readPom(badPomPath);
-      expect(result).toBeDefined();
+      await expect(worker.readPom(badPomPath)).rejects.toThrow("Failed to parse POM");
     } finally {
       try {
         await unlink(badPomPath);
@@ -224,7 +220,7 @@ describe("failure injection: POM worker", () => {
     };
 
     const updated = worker.updateDependencyVersion(
-      pomData as Record<string, unknown>,
+      pomData,
       "com.example",
       "nonexistent",
       "2.0.0",
@@ -244,7 +240,7 @@ describe("failure injection: POM worker", () => {
     };
 
     const updated = worker.updateParentVersion(
-      pomData as Record<string, unknown>,
+      pomData,
       "2.0.0",
     );
 

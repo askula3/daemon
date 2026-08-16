@@ -35,7 +35,7 @@ describe("logger", () => {
     });
 
     it("ignores invalid log level", () => {
-      logger.setLevel("info" as LogLevel);
+      logger.setLevel("info");
       const prev = logger.getLevel();
       logger.setLevel("invalid" as unknown as LogLevel);
       expect(logger.getLevel()).toBe(prev);

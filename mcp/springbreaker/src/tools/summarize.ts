@@ -3,17 +3,21 @@ import { createChildLogger } from "../utils/logger.js";
 import { handleToolError, POMError } from "../utils/errors.js";
 import { planStore } from "../store.js";
 import { SummarizeSchema } from "./schemas.js";
+import { resolveProjectPath } from "../utils/project-path.js";
+import type { ToolContext } from "./context.js";
 
 const log = createChildLogger("Summarize");
 
 // Tool: summarize
 export async function summarize(
   args: z.infer<typeof SummarizeSchema>,
+  _context?: ToolContext,
 ): Promise<{
   content: { type: "text"; text: string }[];
 }> {
   try {
-    const { projectPath, executionId } = args;
+    const { executionId } = args;
+    const projectPath = await resolveProjectPath(args.projectPath);
     log.info(`Summarizing execution ${executionId} for: ${projectPath}`);
 
     // Look up execution from store
@@ -25,6 +29,9 @@ export async function summarize(
     }
 
     const { result, plan } = state;
+    if (plan.projectPath !== projectPath) {
+      throw new POMError(`Execution ${executionId} does not belong to project: ${projectPath}`);
+    }
 
     // Count changes by type
     const upgraded = result.changes.filter((c) => c.type === "upgrade").length;

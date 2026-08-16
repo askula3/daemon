@@ -8,13 +8,55 @@ export interface SemVer {
   build?: string;
 }
 
+function stableQualifier(qualifier: string | undefined): boolean {
+  return qualifier === undefined || /^(?:final|ga|release)$/i.test(qualifier);
+}
+
+function compareQualifier(a: string | undefined, b: string | undefined): -1 | 0 | 1 {
+  if (stableQualifier(a) && stableQualifier(b)) return 0;
+  if (stableQualifier(a)) return b?.toLowerCase().startsWith("sp") ? -1 : 1;
+  if (stableQualifier(b)) return a?.toLowerCase().startsWith("sp") ? 1 : -1;
+
+  const tokenize = (value: string): Array<string | number> =>
+    value.toLowerCase().split(/[.-]/).flatMap((part) => {
+      const pieces = part.match(/\d+|\D+/g) ?? [];
+      return pieces.map((piece) => /^\d+$/.test(piece) ? Number(piece) : piece);
+    });
+  const aliases: Record<string, number> = {
+    alpha: -5, a: -5, beta: -4, b: -4, milestone: -3, m: -3,
+    rc: -2, cr: -2, snapshot: -1, sp: 1,
+  };
+  const left = tokenize(a ?? "");
+  const right = tokenize(b ?? "");
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index++) {
+    const leftPart = left[index];
+    const rightPart = right[index];
+    if (leftPart === rightPart) continue;
+    if (leftPart === undefined) return -1;
+    if (rightPart === undefined) return 1;
+    if (typeof leftPart === "number" && typeof rightPart === "number") {
+      return leftPart < rightPart ? -1 : 1;
+    }
+    const leftRank = typeof leftPart === "string" ? (aliases[leftPart] ?? -1) : leftPart;
+    const rightRank = typeof rightPart === "string" ? (aliases[rightPart] ?? -1) : rightPart;
+    if (leftRank !== rightRank) return leftRank < rightRank ? -1 : 1;
+    const lexical = String(leftPart).localeCompare(String(rightPart));
+    if (lexical !== 0) return lexical < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
 // Parse a version string into SemVer
 export function parseVersion(version: string): SemVer | null {
   // Remove leading 'v' or 'V'
-  const v = version.replace(/^[vV]/, '');
+  const v = version.trim().replace(/^[vV]/, '');
 
-  // Match version pattern: major.minor.patch[-preRelease][+build]
-  const match = v.match(/^(\d+)\.(\d+)\.(\d+)(?:-([a-zA-Z0-9.]+))?(?:\+([a-zA-Z0-9.]+))?$/);
+  // Maven commonly uses one, two, or three numeric release segments. Keep
+  // qualifiers explicit and reject properties, ranges, and dynamic versions.
+  const match = v.match(
+    /^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-.]([a-zA-Z0-9][a-zA-Z0-9.-]*))?(?:\+([a-zA-Z0-9.-]+))?$/,
+  );
 
   if (!match) {
     return null;
@@ -22,8 +64,8 @@ export function parseVersion(version: string): SemVer | null {
 
   return {
     major: parseInt(match[1], 10),
-    minor: parseInt(match[2], 10),
-    patch: parseInt(match[3], 10),
+    minor: parseInt(match[2] ?? "0", 10),
+    patch: parseInt(match[3] ?? "0", 10),
     preRelease: match[4],
     build: match[5],
   };
@@ -35,7 +77,8 @@ export function compareVersions(a: string, b: string): -1 | 0 | 1 {
   const verB = parseVersion(b);
 
   if (!verA || !verB) {
-    return a.localeCompare(b) as -1 | 0 | 1;
+    if (a === b) return 0;
+    return a.localeCompare(b) < 0 ? -1 : 1;
   }
 
   // Compare major
@@ -53,14 +96,7 @@ export function compareVersions(a: string, b: string): -1 | 0 | 1 {
     return verA.patch < verB.patch ? -1 : 1;
   }
 
-  // Compare pre-release
-  if (verA.preRelease && !verB.preRelease) return -1;
-  if (!verA.preRelease && verB.preRelease) return 1;
-  if (verA.preRelease && verB.preRelease) {
-    return verA.preRelease.localeCompare(verB.preRelease) as -1 | 0 | 1;
-  }
-
-  return 0;
+  return compareQualifier(verA.preRelease, verB.preRelease);
 }
 
 // Check if version is newer than another
@@ -72,7 +108,7 @@ export function isNewer(version: string, than: string): boolean {
 export function isStableRelease(version: string): boolean {
   const parsed = parseVersion(version);
   if (!parsed) return false;
-  return !parsed.preRelease;
+  return stableQualifier(parsed.preRelease);
 }
 
 // Check if version is a snapshot
@@ -146,8 +182,7 @@ export function isUpgradeAllowed(
   const target = parseVersion(targetVersion);
 
   if (!current || !target) {
-    // If we can't parse versions, allow it with warning
-    return { allowed: true };
+    return { allowed: false, reason: 'Version cannot be parsed safely' };
   }
 
   // Check upgrade type

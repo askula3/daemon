@@ -1,5 +1,6 @@
 import { createChildLogger } from "../utils/logger.js";
 import { withRetry } from "../utils/retry.js";
+import { fetchWithLimits, parseJsonBody } from "../utils/http.js";
 import {
   isSnapshot,
   isPreRelease,
@@ -24,11 +25,12 @@ export class MavenCentralWorker {
     "https://search.maven.org/solrsearch/select";
 
   // Make API request with retries
-  private async request<T>(url: string): Promise<T> {
+  private async request<T>(url: string, signal?: AbortSignal): Promise<T> {
     return withRetry(
       async () => {
-        const response = await fetch(url, {
+        const { response, body } = await fetchWithLimits(url, {
           headers: { Accept: "application/json" },
+          signal,
         });
 
         if (!response.ok) {
@@ -37,12 +39,13 @@ export class MavenCentralWorker {
           );
         }
 
-        return (await response.json()) as T;
+        return parseJsonBody<T>(body, "Maven Central");
       },
       {
         maxRetries: 2,
         baseDelayMs: 1000,
         label: `Maven Central GET ${url}`,
+        signal,
       },
     );
   }
@@ -50,28 +53,25 @@ export class MavenCentralWorker {
   /**
    * Get all versions of an artifact from Maven Central.
    */
-  async getAllVersions(group: string, name: string): Promise<string[]> {
-    const url =
-      `${MavenCentralWorker.BASE_URL}?q=g:${encodeURIComponent(group)}+AND+a:${encodeURIComponent(name)}` +
-      `&rows=200&wt=json`;
-
-    try {
+  async getAllVersions(group: string, name: string, signal?: AbortSignal): Promise<string[]> {
+    const versions: string[] = [];
+    const rows = 200;
+    for (let start = 0; start < 1_000; start += rows) {
+      const url =
+        `${MavenCentralWorker.BASE_URL}?q=g:${encodeURIComponent(group)}+AND+a:${encodeURIComponent(name)}` +
+        `&core=gav&rows=${rows}&start=${start}&wt=json`;
       const response = await this.request<{
         response: {
           numFound: number;
           docs: Array<{ v: string; latestVersion?: string }>;
         };
-      }>(url);
+      }>(url, signal);
 
-      const versions = response.response.docs.map((d) => d.v).filter(Boolean);
-      log.debug(
-        `Maven Central found ${versions.length} versions for ${group}:${name}`,
-      );
-      return versions;
-    } catch (error) {
-      log.warn(`Maven Central search failed for ${group}:${name}: ${error}`);
-      return [];
+      versions.push(...response.response.docs.map((doc) => doc.v).filter(Boolean));
+      if (start + response.response.docs.length >= response.response.numFound) break;
     }
+    log.debug(`Maven Central found ${versions.length} versions for ${group}:${name}`);
+    return [...new Set(versions)];
   }
 
   /**
@@ -88,16 +88,18 @@ export class MavenCentralWorker {
     options: {
       allowMinor?: boolean;
       allowMajor?: boolean;
+      allowPatch?: boolean;
       allowSnapshots?: boolean;
       allowPreRelease?: boolean;
       allowRedHat?: boolean;
+      signal?: AbortSignal;
     } = {},
   ): Promise<{
     suggested: string | null;
     current: string;
     type: "patch" | "minor" | "major" | "none";
   }> {
-    const versions = await this.getAllVersions(group, name);
+    const versions = await this.getAllVersions(group, name, options.signal);
 
     // Filter versions based on policy
     const validVersions = versions.filter((v) => {
@@ -129,6 +131,7 @@ export class MavenCentralWorker {
         if (!options.allowMinor) continue;
         type = "minor";
       } else {
+        if (options.allowPatch === false) continue;
         type = "patch";
       }
 

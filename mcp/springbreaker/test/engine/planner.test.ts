@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { Planner } from "../../src/engine/planner.js";
 import { PolicyEngine } from "../../src/engine/policy-engine.js";
 import { DependencyGraphBuilder } from "../../src/engine/dependency-graph.js";
 import { DEFAULT_POLICY } from "../../src/config.js";
-import type { Component, Vulnerability } from "../../src/types/index.js";
+import type { Component, ProjectInfo, Vulnerability } from "../../src/types/index.js";
+import type { NexusWorker } from "../../src/workers/nexus-worker.js";
 
 function makeVuln(overrides: Partial<Vulnerability> = {}): Vulnerability {
   return {
@@ -115,9 +116,50 @@ describe("Planner", () => {
       expect(plan.estimatedDuration).toBeDefined();
       expect(typeof plan.estimatedDuration).toBe("string");
     });
+
+    it("rejects an IQ candidate absent from configured Nexus", async () => {
+      const searchVersion = vi.fn().mockResolvedValue(null);
+      const suggestUpgrade = vi.fn().mockResolvedValue({
+        suggested: "1.0.2", current: "1.0.0", type: "patch",
+      });
+      const nexus = {
+        searchVersion,
+        suggestUpgrade,
+      } as unknown as NexusWorker;
+      const nexusPlanner = new Planner(policyEngine, graphBuilder, nexus);
+
+      const plan = await nexusPlanner.createPlan([makeComponent()], "test-project");
+
+      expect(searchVersion).toHaveBeenCalledWith(
+        "com.example", "lib", "1.0.1", undefined, undefined,
+      );
+      expect(plan.tasks[0].component.targetVersion).toBe("1.0.2");
+      expect(plan.tasks[0].expectedFixes).toEqual([]);
+    });
   });
 
   describe("batch building", () => {
+    it("splits a ready DAG layer at maxBatchSize", async () => {
+      const constrainedPlanner = new Planner(
+        new PolicyEngine({ ...DEFAULT_POLICY, maxBatchSize: 1 }),
+        graphBuilder,
+      );
+      const components = [
+        makeComponent(),
+        makeComponent({
+          packageUrl: "pkg:maven/org.apache.commons/commons-lang3@3.12.0",
+          groupId: "org.apache.commons",
+          artifactId: "commons-lang3",
+          version: "3.12.0",
+          vulnerabilities: [makeVuln({ id: "vuln-2", fixVersions: ["3.12.1"] })],
+        }),
+      ];
+
+      const plan = await constrainedPlanner.createPlan(components, "test-project");
+      expect(plan.batches).toHaveLength(2);
+      expect(plan.batches.every((batch) => batch.length === 1)).toBe(true);
+    });
+
     it("should put independent tasks in the same batch", async () => {
       const components = [
         makeComponent(),
@@ -147,6 +189,29 @@ describe("Planner", () => {
   });
 
   describe("task creation", () => {
+    it("removes only the module declaration proven unused", async () => {
+      const rootPomPath = "/test/pom.xml";
+      const modulePomPath = "/test/module/pom.xml";
+      const projectInfo = {
+        projectPath: "/test",
+        rootPomPath,
+        dependencyDeclarations: [
+          { groupId: "com.example", artifactId: "lib", pomPath: rootPomPath, kind: "dependency" as const },
+          { groupId: "com.example", artifactId: "lib", pomPath: modulePomPath, kind: "dependency" as const },
+        ],
+        unusedDependencyDeclarations: [
+          { groupId: "com.example", artifactId: "lib", pomPath: modulePomPath },
+        ],
+      } as ProjectInfo;
+
+      const plan = await planner.createPlan([makeComponent()], "test-project", projectInfo);
+      expect(plan.tasks).toHaveLength(2);
+      expect(plan.tasks.find((task) => task.pomPath === rootPomPath)?.priority)
+        .toBe("upgrade-owning-direct-dependency");
+      expect(plan.tasks.find((task) => task.pomPath === modulePomPath)?.priority)
+        .toBe("remove-unused");
+    });
+
     it("should set correct priority for direct dependencies", async () => {
       const components = [makeComponent()];
 
@@ -319,6 +384,7 @@ describe("Planner", () => {
             },
             reason: "",
             expectedFixes: [],
+            expectedVulnerabilities: [],
             confidence: "medium",
             risk: "low",
             preconditions: [],
@@ -339,6 +405,7 @@ describe("Planner", () => {
             },
             reason: "",
             expectedFixes: [],
+            expectedVulnerabilities: [],
             confidence: "medium",
             risk: "low",
             preconditions: [],
@@ -388,6 +455,7 @@ describe("Planner", () => {
             },
             reason: "",
             expectedFixes: [],
+            expectedVulnerabilities: [],
             confidence: "medium",
             risk: "low",
             preconditions: [],
@@ -480,7 +548,7 @@ describe("Planner", () => {
       const plan = await planner.createPlan(components, "test-project");
 
       expect(plan.tasks.length).toBe(1);
-      expect(plan.tasks[0].priority).toBe("upgrade-owning-direct-dependency");
+      expect(plan.tasks[0].priority).toBe("override-transitive");
     });
 
     it("multiple independent vulnerabilities → same batch", async () => {

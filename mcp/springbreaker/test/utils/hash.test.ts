@@ -3,6 +3,7 @@ import {
   sha256,
   computeProjectFingerprint,
   computePolicyHash,
+  computeServiceConfigHash,
 } from "../../src/utils/hash.js";
 
 describe("hash utilities", () => {
@@ -67,6 +68,21 @@ describe("hash utilities", () => {
       const h1 = computePolicyHash({ severity: ["HIGH"] });
       const h2 = computePolicyHash({ severity: ["LOW"] });
       expect(h1).not.toBe(h2);
+    });
+  });
+
+  describe("computeServiceConfigHash", () => {
+    const config = {
+      iqServerUrl: "https://iq.example.test",
+      iqAppId: "public-app",
+      nexusUrl: "https://nexus.example.test",
+    };
+
+    it("is deterministic but changes with application or endpoint scope", () => {
+      expect(computeServiceConfigHash(config)).toBe(computeServiceConfigHash(config));
+      expect(computeServiceConfigHash(config)).not.toBe(
+        computeServiceConfigHash({ ...config, iqAppId: "another-app" }),
+      );
     });
   });
 });

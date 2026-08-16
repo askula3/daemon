@@ -1,0 +1,42 @@
+name: SpringBreaker CI
+
+on:
+  push:
+    paths:
+      - "mcp/springbreaker/**"
+      - ".github/workflows/springbreaker-ci.yml"
+  pull_request:
+    paths:
+      - "mcp/springbreaker/**"
+      - ".github/workflows/springbreaker-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: springbreaker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    defaults:
+      run:
+        working-directory: mcp/springbreaker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: mcp/springbreaker/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm audit --audit-level=moderate
+      - run: npm pack --dry-run

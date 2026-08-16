@@ -18,7 +18,7 @@ export { buildPlan } from './build-plan.js';
 export { executePlan } from './execute-plan.js';
 export { verify } from './verify.js';
 export { summarize } from './summarize.js';
-export { buildProjectInfo } from './project-info.js';
+export { analyzeProjectUsage, buildProjectInfo } from './project-info.js';
 export {
   InspectProjectSchema,
   BuildPlanSchema,
@@ -31,34 +31,44 @@ export {
 export const tools = [
   {
     name: "inspect_project",
+    title: "Inspect Maven Project",
     description:
-      "Inspect a Maven project and gather information about its structure, dependencies, and capabilities",
+      "Safely inspect a Maven project's POM structure, modules, Git state, and configured capabilities. Does not run Maven or modify project files.",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: InspectProjectSchema,
     handler: inspectProject,
   },
   {
     name: "build_plan",
+    title: "Build Remediation Plan",
     description:
-      "Build an execution plan for remediating vulnerabilities in a Maven project",
+      "Generate an ephemeral CycloneDX SBOM, scan it with Sonatype IQ, and build a deterministic, immutable remediation plan. Runs Maven and calls configured external services, but does not edit POM files.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     inputSchema: BuildPlanSchema,
     handler: buildPlan,
   },
   {
     name: "execute_plan",
-    description: "Execute an approved remediation plan",
+    title: "Execute Remediation Plan",
+    description: "Apply an approved immutable plan in verified batches. POM edits are transactional; failed build or IQ verification rolls back the current batch. Git branch and commit operations are opt-in.",
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     inputSchema: ExecutePlanSchema,
     handler: executePlan,
   },
   {
     name: "verify",
+    title: "Verify Remediation",
     description:
-      "Verify the build and run IQ scan to check for remaining vulnerabilities",
+      "Run Maven clean verify and a fresh CycloneDX IQ scan, optionally comparing the verified result with a stored execution.",
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     inputSchema: VerifySchema,
     handler: verify,
   },
   {
     name: "summarize",
-    description: "Generate a summary of the remediation execution results",
+    title: "Summarize Execution",
+    description: "Read a stored execution and return a project-bound remediation summary with verified outcomes and follow-up recommendations.",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: SummarizeSchema,
     handler: summarize,
   },

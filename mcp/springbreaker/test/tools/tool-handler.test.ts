@@ -7,7 +7,38 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, realpath, writeFile, rm } from "node:fs/promises";
+
+const iqScanState = vi.hoisted(() => ({ calls: 0 }));
+vi.mock("../../src/tools/iq-scan.js", () => ({
+  scanProjectWithIq: vi.fn().mockImplementation(async () => {
+    const initial = iqScanState.calls++ === 0;
+    return {
+      reportId: `report-${iqScanState.calls}`,
+      applicationId: "test-app",
+      scanId: `scan-${iqScanState.calls}`,
+      scanTime: "2024-01-01T00:00:00Z",
+      components: initial ? [{
+        packageUrl: "pkg:maven/com.example/lib@1.0.0",
+        displayName: "com.example:lib:1.0.0",
+        version: "1.0.0",
+        groupId: "com.example",
+        artifactId: "lib",
+        extension: "jar",
+        vulnerabilities: [{
+          id: "CVE-2024-001", referenceUrl: "https://example.test/CVE-2024-001",
+          description: "Test vulnerability", severity: "HIGH", cvssScore: 8,
+          CWEs: ["CWE-79"], licenseRisk: false,
+          componentDisplayName: "com.example:lib:1.0.0", pathNames: [],
+          suggestedVersion: "1.0.1", fixVersions: ["1.0.1"],
+          firstPublished: "2024-01-01", lastModified: "2024-01-01",
+        }],
+      }] : [],
+      totalVulnerabilities: initial ? 1 : 0,
+      vulnerabilitiesBySeverity: { CRITICAL: 0, HIGH: initial ? 1 : 0, MEDIUM: 0, LOW: 0 },
+    };
+  }),
+}));
 
 // Mock all workers at the module level
 vi.mock("../../src/workers/maven-worker.js", () => ({
@@ -17,6 +48,7 @@ vi.mock("../../src/workers/maven-worker.js", () => ({
     getDependencyTree: vi.fn().mockResolvedValue(
       `[INFO] com.example:my-app:jar:1.0.0\n[INFO] +- com.example:lib:jar:1.0.0:compile`
     ),
+    analyzeUnusedDependencies: vi.fn().mockResolvedValue([]),
     cleanVerify: vi.fn().mockResolvedValue({
       exitCode: 0, stdout: "BUILD SUCCESS", stderr: "", duration: 1000, success: true,
     }),
@@ -82,13 +114,13 @@ vi.mock("../../src/workers/git-worker.js", () => ({
     getCurrentBranch: vi.fn().mockResolvedValue("main"),
     getLastCommitHash: vi.fn().mockResolvedValue("abc123def456"),
     getStatus: vi.fn().mockResolvedValue({
-      modified: [], staged: [], not_added: [], created: [],
-      deleted: [], renamed: [], conflicted: [],
+      modified: [], staged: [], notAdded: [], changed: [], isClean: true,
     }),
     init: vi.fn().mockResolvedValue(undefined),
     createBranch: vi.fn().mockResolvedValue(undefined),
     add: vi.fn().mockResolvedValue(undefined),
     commit: vi.fn().mockResolvedValue("commit-hash"),
+    commitFiles: vi.fn().mockResolvedValue("commit-hash"),
   })),
 }));
 
@@ -108,6 +140,8 @@ vi.mock("../../src/config.js", async () => {
       preferMvnw: true,
       mavenOpts: undefined,
       logLevel: "info",
+      mavenEnvAllowlist: [],
+      allowInsecureHttp: true,
     }),
   };
 });
@@ -117,7 +151,8 @@ describe("tool handler integration: build_plan → execute_plan → verify → s
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    tmpDir = await mkdtemp(join(tmpdir(), "springbreaker-integ-"));
+    iqScanState.calls = 0;
+    tmpDir = await realpath(await mkdtemp(join(tmpdir(), "springbreaker-integ-")));
 
     // Create a minimal pom.xml
     await writeFile(
@@ -138,6 +173,21 @@ describe("tool handler integration: build_plan → execute_plan → verify → s
 </project>`,
       "utf-8",
     );
+  });
+
+  it("inspect_project reports structure and capabilities without executing project code", async () => {
+    const { inspectProject } = await import("../../src/tools/inspect-project.js");
+    const response = await inspectProject({ projectPath: tmpDir });
+    const inspection = JSON.parse(response.content[0].text);
+
+    expect(inspection.projectPath).toBe(tmpDir);
+    expect(inspection.rootPomPath).toBe(join(tmpDir, "pom.xml"));
+    expect(inspection.capabilities).toMatchObject({
+      hasMaven: true,
+      hasSpringBoot: false,
+      isMultiModule: false,
+    });
+    expect(inspection.recommendations ?? []).toBeInstanceOf(Array);
   });
 
   afterEach(async () => {
@@ -191,6 +241,7 @@ describe("tool handler integration: build_plan → execute_plan → verify → s
       planId: plan.id,
       commit: true,
       createBranch: true,
+      approveAll: true,
     });
 
     expect(execResult.content).toHaveLength(1);
@@ -215,6 +266,7 @@ describe("tool handler integration: build_plan → execute_plan → verify → s
     const dryResult = await executePlan({
       projectPath: tmpDir,
       planId: plan.id,
+      approveAll: true,
       dryRun: true,
     });
 
@@ -247,6 +299,7 @@ describe("tool handler integration: build_plan → execute_plan → verify → s
     const execResult = await executePlan({
       projectPath: tmpDir,
       planId: plan.id,
+      approveAll: true,
     });
 
     const result = JSON.parse(execResult.content[0].text);
@@ -266,6 +319,7 @@ describe("tool handler integration: build_plan → execute_plan → verify → s
     const execResult = await executePlan({
       projectPath: tmpDir,
       planId: plan.id,
+      approveAll: true,
     });
 
     const execution = JSON.parse(execResult.content[0].text);
@@ -273,9 +327,7 @@ describe("tool handler integration: build_plan → execute_plan → verify → s
 
     // Git add/commit should NOT have been called
     const { GitWorker } = await import("../../src/workers/git-worker.js");
-    const mockInstances = vi.mocked(GitWorker).mock.results;
-    // At least one GitWorker was created — check that commit was NOT called
-    // (or if called, it was only in the "no commit" path)
+    expect(vi.mocked(GitWorker).mock.results.length).toBeGreaterThan(0);
   });
 
   it("summarize produces a readable summary", async () => {
@@ -290,6 +342,7 @@ describe("tool handler integration: build_plan → execute_plan → verify → s
     const execResult = await executePlan({
       projectPath: tmpDir,
       planId: plan.id,
+      approveAll: true,
     });
     const execution = JSON.parse(execResult.content[0].text);
 
@@ -338,7 +391,7 @@ describe("tool handler integration: build_plan → execute_plan → verify → s
     // Build + Execute to get an executionId
     const planResult = await buildPlan({ projectPath: tmpDir });
     const plan = JSON.parse(planResult.content[0].text);
-    const execResult = await executePlan({ projectPath: tmpDir, planId: plan.id });
+    const execResult = await executePlan({ projectPath: tmpDir, planId: plan.id, approveAll: true });
     const execution = JSON.parse(execResult.content[0].text);
 
     // Verify with comparison

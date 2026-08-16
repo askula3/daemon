@@ -8,15 +8,16 @@ Each MCP is isolated in its own subfolder with independent dependencies, configu
 
 | MCP                                | Description                                                                                                                         |
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| [springbreaker/](./springbreaker/) | ⚡ Deterministic remediation of Spring Boot Maven dependency vulnerabilities — works with or without IQ Server and Nexus Repository |
+| [springbreaker/](./springbreaker/) | Deterministic Spring Boot Maven vulnerability remediation with IQ Server; Nexus is optional and Maven Central is the public fallback |
 
 ## Quick Start
 
 ```bash
 # Build and run SpringBreaker
 cd springbreaker
-npm install && npm run build
-node dist/index.js
+npm ci
+npm run check
+npm start
 ```
 
 See [springbreaker/README.md](./springbreaker/README.md) for full setup, integration guides (VS Code, OpenCode, Claude Desktop), and tool reference.

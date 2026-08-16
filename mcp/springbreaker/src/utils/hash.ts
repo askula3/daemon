@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { EnvConfig } from '../types/index.js';
 
 /**
  * Compute SHA-256 hash of the given string content.
@@ -17,10 +18,14 @@ export function computeProjectFingerprint(
   rootPomContent: string,
   modules: string[],
   dependencyManagement: Array<{ groupId: string; artifactId: string; version: string }>,
+  fingerprintFiles?: Record<string, string>,
 ): string {
   const canonical = JSON.stringify({
     pom: rootPomContent,
-    modules: modules.sort(),
+    files: fingerprintFiles
+      ? Object.entries(fingerprintFiles).sort(([a], [b]) => a.localeCompare(b))
+      : undefined,
+    modules: [...modules].sort(),
     deps: dependencyManagement
       .map(d => `${d.groupId}:${d.artifactId}:${d.version}`)
       .sort(),
@@ -34,4 +39,15 @@ export function computeProjectFingerprint(
  */
 export function computePolicyHash(policy: Record<string, unknown>): string {
   return sha256(JSON.stringify(policy));
+}
+
+/** Bind a plan to non-secret external-service identity and application scope. */
+export function computeServiceConfigHash(
+  config: Pick<EnvConfig, "iqServerUrl" | "iqAppId" | "nexusUrl">,
+): string {
+  return sha256(JSON.stringify({
+    iqServerUrl: config.iqServerUrl,
+    iqAppId: config.iqAppId,
+    nexusUrl: config.nexusUrl,
+  }));
 }

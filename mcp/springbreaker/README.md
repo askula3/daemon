@@ -1,80 +1,73 @@
-# ⚡ SpringBreaker
+# SpringBreaker
 
-> Breaks through Spring Boot dependency vulnerabilities — deterministically.
+SpringBreaker is a deterministic, local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for planning, applying, and verifying Maven dependency remediations in Spring Boot projects. Sonatype IQ supplies vulnerability findings and recommended versions; Nexus Repository and Maven Central supply version candidates. Dependency decisions are made by encoded policy, not by an LLM.
 
-A deterministic [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that automates remediation of Spring Boot Maven dependency vulnerabilities. No LLM reasoning is used for dependency decisions — all remediation choices follow encoded business rules.
+The server uses stdio, makes POM edits only after explicit approval, verifies each batch, and restores the current batch if verification fails.
 
-**Works with or without Sonatype IQ Server and Nexus Repository.** When IQ/Nexus are not configured, the server falls back to Maven Central for version resolution.
+## Requirements
 
-## Quick Start (2 minutes)
+- Node.js 20 or newer
+- Maven 3.8+ or a checked-in executable Maven Wrapper
+- A compatible JDK for the target project
+- Sonatype IQ Server credentials and an application public ID for vulnerability planning
+- Optional Sonatype Nexus Repository credentials for private version discovery
 
-### Prerequisites
+Without IQ, `inspect_project` and Maven analysis still work, but `build_plan` has no vulnerability findings and returns an empty plan with a warning. Without Nexus, public component lookup falls back to Maven Central.
 
-- **Node.js** >= 18.0.0
-- **Maven** or Maven Wrapper (`./mvnw`) on PATH
-- A Spring Boot Maven project
+## Install and verify
 
-### Install and build
+From this directory:
 
 ```bash
-cd mcp/springbreaker
-npm install
-npm run build
+npm ci
+npm run check
+npm start
 ```
 
-### Test it works
+`npm run check` runs strict type checking, zero-warning lint, the test suite with enforced coverage, and a production build. The server writes protocol messages to stdout and operational logs to stderr.
 
-```bash
-# Verify the server starts (Ctrl+C to stop)
-node dist/index.js
-```
+## Trusted server configuration
 
-### No IQ Server? No Nexus? No problem.
+Set service credentials in the MCP process environment or in `.env` beside this package. Do not commit `.env`. Copy `.env.example` for the complete list.
 
-The server works without any external services. Without IQ Server it cannot detect vulnerabilities automatically, but it can still inspect your project, analyse the dependency tree, and suggest upgrades from Maven Central.
+```dotenv
+IQ_SERVER_URL=https://iq.example.com
+IQ_USERNAME=service-account
+IQ_SERVER_TOKEN=replace-with-secret
+IQ_APP_ID=my-public-application-id
 
-To enable full vulnerability scanning, configure IQ Server (see [Full Setup](#full-setup-with-iq-server--nexus)).
+NEXUS_URL=https://nexus.example.com
+NEXUS_USERNAME=read-only-account
+NEXUS_PASSWORD=replace-with-secret
 
-## Full Setup (with IQ Server + Nexus)
-
-### Environment variables
-
-Create a `.env` file in your Maven project root or in the server directory:
-
-```bash
-# ── IQ Server (optional — enables vulnerability scanning) ────────
-IQ_SERVER_URL=http://localhost:8070
-IQ_SERVER_TOKEN=your-iq-server-token-here
-IQ_APP_ID=your-application-id
-
-# ── Nexus Repository (optional — enables private repo lookups) ──
-# When not configured, the server uses Maven Central (search.maven.org)
-NEXUS_URL=http://localhost:8081
-NEXUS_USERNAME=admin
-NEXUS_PASSWORD=admin123
-
-# ── Maven ────────────────────────────────────────────────────────
+SPRINGBREAKER_ALLOWED_ROOTS=/srv/workspaces:/opt/projects
 PREFER_MVNW=true
-# MAVEN_OPTS=-Xmx2g
-
-# ── Policy defaults ──────────────────────────────────────────────
-DEFAULT_SEVERITY=HIGH,MEDIUM
-ALLOW_MINOR_UPGRADES=true
-ALLOW_MAJOR_UPGRADES=false
-ALLOW_SNAPSHOTS=false
-ALLOW_REDHAT=false
-
-# ── Logging (debug | info | warn | error) ────────────────────────
 LOG_LEVEL=info
 ```
 
-### Policy configuration
+Non-loopback service URLs must use HTTPS. For an intentionally insecure non-loopback development service, set `ALLOW_INSECURE_HTTP=true` only in trusted server configuration.
 
-Create `.remediation-policy.json` in your Maven project root to customise remediation behaviour:
+Target-project `.env` files can supply project policy values such as `DEFAULT_SEVERITY`, but cannot override IQ/Nexus credentials by default. `ALLOW_PROJECT_SERVICE_CONFIG=true` opts into that weaker trust model, and only complete IQ or Nexus credential bundles are accepted from a project. `MAVEN_OPTS`, `MAVEN_ENV_ALLOWLIST`, allowed roots, and trust switches always come from trusted server configuration.
+
+`SPRINGBREAKER_ALLOWED_ROOTS` is strongly recommended for shared hosts. Separate multiple roots with the platform path delimiter (`:` on Unix, `;` on Windows). Paths and module POMs are canonicalized to prevent symlink escape and lock bypass.
+
+### Maven subprocess environment
+
+Maven receives a small operating-system/JDK allowlist rather than the complete server environment, so IQ and Nexus secrets are not inherited. Secret credential names are rejected even if listed. Add only required non-secret variable names:
+
+```dotenv
+MAVEN_ENV_ALLOWLIST=HTTP_PROXY,HTTPS_PROXY,NO_PROXY
+```
+
+Because Maven wrappers, plugins, and tests are project-controlled code, run SpringBreaker with a least-privilege account or inside an appropriately restricted container.
+
+## Project policy
+
+Place `.remediation-policy.json` in the target Maven project when its defaults need adjustment:
 
 ```json
 {
-  "severity": ["HIGH", "MEDIUM"],
+  "severity": ["CRITICAL", "HIGH", "MEDIUM"],
   "preferParentUpgrade": true,
   "preferOwningDependency": true,
   "preferIqSuggestion": true,
@@ -95,317 +88,163 @@ Create `.remediation-policy.json` in your Maven project root to customise remedi
 }
 ```
 
-### Capability matrix
+Unknown or invalid policy values fail closed. Unused-dependency removal is proposed only when the pinned Maven dependency analysis identifies that exact declaration; failed or ambiguous analysis remains “unknown” and causes no removal.
 
-| Feature                  |  IQ + Nexus   |  IQ only   |        Nexus only        |     Neither      |
-| ------------------------ | :-----------: | :--------: | :----------------------: | :--------------: |
-| Inspect project          |      ✅       |     ✅     |            ✅            |        ✅        |
-| Dependency tree analysis |      ✅       |     ✅     |            ✅            |        ✅        |
-| Vulnerability detection  |  ✅ IQ scan   | ✅ IQ scan |            ❌            |        ❌        |
-| Version resolution       | ✅ IQ → Nexus | ✅ IQ only | ✅ Nexus → Maven Central | ✅ Maven Central |
-| Build verification       |      ✅       |     ✅     |            ✅            |        ✅        |
-| Auto-commit/branch       |      ✅       |     ✅     |            ✅            |        ✅        |
+## MCP client configuration
 
-## Integration
-
-### VS Code
-
-Create `.vscode/mcp.json` in your workspace:
-
-```json
-{
-  "servers": {
-    "springbreaker": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["${workspaceFolder}/mcp/springbreaker/dist/index.js"],
-      "env": {
-        "IQ_SERVER_URL": "${env:IQ_SERVER_URL}",
-        "IQ_SERVER_TOKEN": "${env:IQ_SERVER_TOKEN}",
-        "IQ_APP_ID": "${env:IQ_APP_ID}"
-      }
-    }
-  }
-}
-```
-
-For sensitive values, use input variables instead of environment references:
-
-```json
-{
-  "servers": {
-    "springbreaker": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["${workspaceFolder}/mcp/springbreaker/dist/index.js"],
-      "env": {
-        "IQ_SERVER_TOKEN": "${input:iqToken}",
-        "IQ_APP_ID": "${input:iqAppId}"
-      }
-    }
-  },
-  "inputs": [
-    {
-      "id": "iqToken",
-      "type": "promptString",
-      "description": "Sonatype IQ Server Token",
-      "password": true
-    },
-    {
-      "id": "iqAppId",
-      "type": "promptString",
-      "description": "IQ Application ID"
-    }
-  ]
-}
-```
-
-### OpenCode / Crush
-
-Add to `opencode.json` in your project root:
-
-```json
-{
-  "mcp": {
-    "springbreaker": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["/absolute/path/to/mcp/springbreaker/dist/index.js"],
-      "env": {
-        "IQ_SERVER_URL": "{env:IQ_SERVER_URL}",
-        "IQ_SERVER_TOKEN": "{env:IQ_SERVER_TOKEN}",
-        "IQ_APP_ID": "{env:IQ_APP_ID}"
-      }
-    }
-  }
-}
-```
-
-### Claude Desktop
-
-Add to `claude_desktop_config.json`:
+Build first, then configure any stdio-capable MCP client with an absolute path:
 
 ```json
 {
   "mcpServers": {
     "springbreaker": {
       "command": "node",
-      "args": ["/absolute/path/to/mcp/springbreaker/dist/index.js"]
+      "args": ["/absolute/path/to/daemon/mcp/springbreaker/dist/index.js"],
+      "env": {
+        "IQ_SERVER_URL": "https://iq.example.com",
+        "IQ_USERNAME": "service-account",
+        "IQ_SERVER_TOKEN": "${IQ_SERVER_TOKEN}",
+        "IQ_APP_ID": "my-public-application-id",
+        "SPRINGBREAKER_ALLOWED_ROOTS": "/absolute/path/to/projects"
+      }
     }
   }
 }
 ```
 
-### Generic MCP Client (stdio)
+Use the client’s secret facility when available. Never place a real token in a committed client configuration.
 
-```bash
-# The server communicates over stdin/stdout (JSON-RPC)
-node /path/to/mcp/springbreaker/dist/index.js
-```
+## Safe workflow
 
-Environment variables can be passed inline:
+1. Call `inspect_project` to validate the path and see detected capabilities.
+2. Call `build_plan`; it resolves the dependency graph, uploads a CycloneDX SBOM to IQ, applies policy, and stores an immutable plan.
+3. Review every task, risk, evidence item, expected fix, and planning issue.
+4. Call `execute_plan` with `approveAll: true` or a non-empty `approvedTasks` list. Use `dryRun: true` to preview without consuming the plan.
+5. Call `verify` for an independent build/IQ check and `summarize` for the stored audit result.
 
-```bash
-IQ_SERVER_TOKEN=xyz IQ_APP_ID=my-app node dist/index.js
-```
-
-## Tools Reference
+Every response has structured content shaped as `{ "ok": true, "data": ... }` or `{ "ok": false, "error": ... }`. Errors include a stable code and recoverability flag. Long operations report MCP progress and honor cancellation.
 
 ### `inspect_project`
 
-Inspect a Maven project's structure, dependencies, and capabilities. Returns recommendations when IQ/Nexus are not configured.
+Read-only project structure and capability inspection. It does not run project build plugins.
 
 ```json
-{ "projectPath": "/path/to/your/maven/project" }
+{ "projectPath": "/absolute/path/to/project" }
 ```
 
 ### `build_plan`
 
-Build a remediation plan. Requires vulnerability data from IQ Server — without IQ, returns an empty plan with a warning.
+Build and persist a project-bound plan. A plan records the canonical project path, full project fingerprint, policy hash, Git revision, and a non-secret binding to its IQ/Nexus endpoints and IQ application.
 
 ```json
 {
-  "projectPath": "/path/to/your/maven/project",
-  "severity": ["HIGH", "MEDIUM"],
+  "projectPath": "/absolute/path/to/project",
+  "severity": ["CRITICAL", "HIGH"],
   "policy": {
     "allowMinor": true,
-    "allowMajor": false
+    "allowMajor": false,
+    "verifyBuild": true,
+    "verifyIq": true
   }
 }
 ```
 
 ### `execute_plan`
 
-Execute an approved remediation plan. Supports dry-run mode, optional auto-commit, and optional feature branch creation.
+Execute explicitly approved tasks. `commit` and `createBranch` default to `false`.
 
 ```json
 {
-  "projectPath": "/path/to/your/maven/project",
-  "planId": "plan-id-from-build-plan",
-  "approvedTasks": ["task-id-1", "task-id-2"],
+  "projectPath": "/absolute/path/to/project",
+  "planId": "00000000-0000-4000-8000-000000000000",
+  "approvedTasks": ["00000000-0000-4000-8000-000000000001"],
   "dryRun": false,
   "commit": false,
   "createBranch": false
 }
 ```
 
-| Field           | Default | Description                                    |
-| --------------- | ------- | ---------------------------------------------- |
-| `approvedTasks` | all     | Task IDs to execute (empty = all)              |
-| `dryRun`        | `false` | Preview changes without modifying files        |
-| `commit`        | `false` | Auto-commit changes after successful execution |
-| `createBranch`  | `false` | Create a feature branch before modifying files |
+Use either `approvedTasks` or `approveAll`, never both. A non-dry execution claims the plan for one-shot use so duplicated requests cannot repeat edits. If project content, policy, or path differs from the plan, execution is rejected as stale.
+
+Before editing, all project POMs are backed up outside the project. Tasks run in dependency-ordered batches. Each batch is verified as a unit; a failed batch restores only its own changes, preserving earlier successful batches. IQ verification compares exact coordinates and versions, not vulnerability IDs alone. Git branch creation and commits require explicit flags, a Git repository, and a clean working tree; commits stage only POMs changed by SpringBreaker.
+
+After a successful batch, IQ results can trigger deterministic replanning. Actions identical to those already approved may continue. A new target, priority, component, or POM target pauses execution and returns `continuationPlanId`; review and explicitly approve that new immutable plan before continuing.
 
 ### `verify`
 
-Run `mvn clean verify` and optionally re-scan with IQ Server.
+Run a fresh `mvn clean verify` and IQ scan, with optional comparison to a stored execution:
 
 ```json
 {
-  "projectPath": "/path/to/your/maven/project",
+  "projectPath": "/absolute/path/to/project",
   "skipBuild": false,
   "skipIq": false,
-  "compareWithExecutionId": "optional-execution-id"
+  "compareWithExecutionId": "00000000-0000-4000-8000-000000000002"
 }
 ```
 
-### `summarise`
+### `summarize`
 
-Generate a summary of a completed remediation execution.
+Return a project-bound summary of a stored execution:
 
 ```json
 {
-  "projectPath": "/path/to/your/maven/project",
-  "executionId": "execution-id-from-execute-plan"
+  "projectPath": "/absolute/path/to/project",
+  "executionId": "00000000-0000-4000-8000-000000000002"
 }
 ```
 
-## Architecture
+## Deterministic decision order
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     MCP Server (stdio)                           │
-├─────────────────────────────────────────────────────────────────┤
-│  Tools (Public API)                                             │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐              │
-│  │ inspect_    │ │ build_plan  │ │ execute_    │              │
-│  │ project     │ │             │ │ plan        │              │
-│  └─────────────┘ └─────────────┘ └─────────────┘              │
-│  ┌─────────────┐ ┌─────────────┐                               │
-│  │ verify      │ │ summarise   │                               │
-│  └─────────────┘ └─────────────┘                               │
-├─────────────────────────────────────────────────────────────────┤
-│  Engine (Pure domain logic — no I/O)                           │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐           │
-│  │ Dependency   │ │ Policy       │ │ Planner      │           │
-│  │ GraphBuilder │ │ Engine       │ │ (DAG batches)│           │
-│  └──────────────┘ └──────────────┘ └──────────────┘           │
-├─────────────────────────────────────────────────────────────────┤
-│  Workers (Stateless I/O — fresh instance per call)             │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐         │
-│  │ IQ       │ │ Nexus    │ │ Maven    │ │ Maven    │         │
-│  │ Worker   │ │ Worker   │ │ Central  │ │ Worker   │         │
-│  │          │ │          │ │ Worker   │ │          │         │
-│  └──────────┘ └──────────┘ └──────────┘ └──────────┘         │
-│  ┌──────────┐ ┌──────────┐                                    │
-│  │ POM      │ │ Git      │                                    │
-│  │ Worker   │ │ Worker   │                                    │
-│  └──────────┘ └──────────┘                                    │
-├─────────────────────────────────────────────────────────────────┤
-│  Utilities                                                      │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐         │
-│  │ Lock     │ │ SemVer   │ │ Retry    │ │ Hash     │         │
-│  │ (mutex)  │ │ (parse)  │ │ (backoff)│ │ (SHA-256)│         │
-│  └──────────┘ └──────────┘ └──────────┘ └──────────┘         │
-│  ┌──────────┐ ┌──────────┐                                    │
-│  │ Concur.  │ │ Logger   │                                    │
-│  │ (p-limit)│ │ (stderr) │                                    │
-│  └──────────┘ └──────────┘                                    │
-└─────────────────────────────────────────────────────────────────┘
-```
+SpringBreaker prefers coordinated Spring Boot parent/property/BOM updates, then owning or direct dependencies, repository-confirmed stable upgrades, conservative transitive overrides, and exact unused declarations. Patch upgrades are preferred over minor and major upgrades. Snapshots, vendor builds, and disallowed version ranges are filtered by policy.
 
-### Version resolution fallback chain
+IQ remediation data is interpreted using Sonatype’s application, third-party scan, report, and component-remediation API contracts. Nexus search and Maven Central `gav` search are paginated and bounded. Maven, IQ, Nexus, and Maven Central calls use bounded concurrency, retry only eligible failures, and cap response/output sizes.
 
-```
-IQ Server suggestion → Nexus Repository → Maven Central (public, no auth)
-```
+## Runtime state and limits
 
-## Design Principles
+Plans and executions are held in memory by one server process:
 
-- **Deterministic over heuristic** — No LLM reasoning for dependency decisions
-- **Safe upgrades** — Prefer patch > minor > major upgrades
-- **Parallel execution** — Independent tasks run in parallel (bounded concurrency)
-- **Verifiable** — Every change can be verified and rolled back
-- **Policy-driven** — All decisions follow encoded business rules
-- **Works standalone** — No IQ or Nexus required for basic functionality
+- up to 50 plans, retained for 24 hours with LRU-style refresh;
+- up to 100 execution records, retained for seven days;
+- state is lost on process restart;
+- `execute_plan` and `summarize` must use the same running MCP process that created their IDs.
 
-## Remediation Priority
+Re-run `build_plan` after a restart, an expired plan, a stale fingerprint, or a completed non-dry execution. This state model is appropriate for a local stdio server; durable or horizontally scaled transports require an external implementation of the plan store plus transport authentication and authorization.
 
-1. Upgrade Spring Boot parent/BOM (coordinated upgrade)
-2. Upgrade owning direct dependency
-3. Upgrade direct dependency
-4. Apply IQ suggested version
-5. Search Nexus / Maven Central for latest stable GA version
-6. Override vulnerable transitive dependency
-7. Exclude and replace
-8. Remove dependency if unused
+## Operational notes
 
-## Testing
-
-~250 tests across 19 test files covering engine logic, utilities, workers, and tool handlers.
-
-```bash
-npm test              # Run all tests
-npm run test:watch    # Watch mode
-npm run test:coverage # Coverage report
-```
+- `inspect_project`, `build_plan`, `execute_plan`, and `verify` are serialized per canonical project path.
+- Maven workflows default to five-minute timeouts and HTTP attempts to 15 seconds; policy can set workflow timeouts up to one hour through tool input.
+- Maven output and HTTP bodies are bounded to prevent unbounded memory growth.
+- Maven Central is a public fallback only; private components need Nexus or an IQ recommendation that the project build can resolve.
+- SpringBreaker supports stdio only. Do not expose it as a network service without adding transport authentication, authorization, rate limiting, and durable shared state.
+- Sonatype deployments vary by version. Validate the configured API endpoints against the IQ version used in production before rollout.
 
 ## Troubleshooting
 
-### "Plan not found" error when running `execute_plan`
+**Plan not found or already claimed** — Plans expire, disappear on restart, and are single-use for non-dry execution. Build and review a new plan.
 
-Plans are stored in memory and lost when the server restarts. Run `build_plan` again in the same session.
+**Plan is stale** — A POM, module layout, wrapper configuration, policy, canonical path, or Git revision changed after planning. Build a new plan rather than bypassing the check.
 
-### `build_plan` returns an empty plan
+**Empty plan** — Confirm both `IQ_SERVER_TOKEN` and `IQ_APP_ID` are present and that the application/report contains findings at the selected severities.
 
-Without IQ Server configured, the server cannot detect vulnerabilities. Configure `IQ_SERVER_TOKEN` and `IQ_APP_ID` to enable vulnerability scanning.
+**HTTP URL rejected** — Use HTTPS. Plain HTTP is accepted automatically only for loopback hosts; the trusted `ALLOW_INSECURE_HTTP=true` escape hatch is intended for controlled development networks.
 
-### Maven command fails
+**Maven wrapper ignored** — On Unix, the checked-in wrapper must already be executable. SpringBreaker never changes its permissions. Otherwise it safely falls back to `mvn` on `PATH`.
 
-- Ensure Maven (or `./mvnw`) is on PATH and the project builds with `mvn clean verify`
-- Set `PREFER_MVNW=false` if you want to use the system `mvn` instead of the wrapper
-- Check `MAVEN_OPTS` if builds fail with memory errors
+**Build or scan times out** — Increase policy `timeout` deliberately, inspect stderr structured logs, and confirm the target build and Sonatype services are healthy.
 
-### Server starts but tools aren't available in VS Code
-
-- Check the MCP output log: Command Palette → MCP: List Servers → select SpringBreaker → Show Output
-- Ensure the `dist/` directory exists (`npm run build`)
-- Verify Node.js >= 18 (`node --version`)
-
-### Nexus or IQ connection errors
-
-- The server retries failed requests automatically (3 retries with exponential backoff)
-- Check that the URLs are reachable from your machine
-- Look for structured error codes in the response (`IQ_SERVER_ERROR`, `NEXUS_ERROR`)
-
-## Development
+## Development and release gates
 
 ```bash
-cd mcp/springbreaker
-npm install           # Install dependencies
-npm run typecheck     # TypeScript strict check
-npm test              # Run tests
-npm run lint          # ESLint
-npm run dev           # Watch mode (auto-restart on changes)
-npm run build         # Production build → dist/
+npm ci --ignore-scripts
+npm run check
+npm audit --audit-level=moderate
+npm pack --dry-run
 ```
 
-See [CONTRIBUTING.md](../../CONTRIBUTING.md) for contribution guidelines and [AGENTS.md](../../AGENTS.md) for the full architecture and critical pitfalls.
+CI runs these gates on Node.js 20 and 22. Coverage thresholds are enforced in `vitest.config.ts`; dependency updates are managed by Dependabot. See the [design document](docs/SpringBoot-IQ-Nexus-MCP-Design.md), [MCP overview](../README.md), [contribution guide](../../CONTRIBUTING.md), [security policy](SECURITY.md), and [changelog](CHANGELOG.md).
 
 ## License
 
-MIT
-
-## Overview
-
-This MCP server owns all domain logic for vulnerability remediation. The AI only orchestrates high-level commands like "Resolve HIGH and MEDIUM vulnerabilities." The MCP will:
+MIT. See [LICENSE](LICENSE).

@@ -8,21 +8,18 @@ internal URLs**.
 
 ```bash
 cd mcp/springbreaker
-npm install
-npm run typecheck
-npm test
-npm run lint
+npm ci
+npm run check
 ```
 
 ## Before you submit
 
-Run the full verification workflow (typecheck + tests + lint). See the
+Run the full verification workflow. See the
 [`run-tests-lint` skill](.github/skills/run-tests-lint/SKILL.md) for details.
 
-- [ ] `npm run typecheck` passes (strict TS — no unused vars/params)
-- [ ] `npm test` passes (~275 tests)
-- [ ] `npm run lint` passes
-- [ ] `npm run build` succeeds (confirms ESM/Node16 resolution)
+- [ ] `npm run check` passes (strict types, zero-warning lint, coverage, tests, build)
+- [ ] `npm audit --audit-level=moderate` reports no vulnerabilities
+- [ ] `npm pack --dry-run` contains the executable and required public docs
 - [ ] No secrets or internal URLs committed
 
 ## Code conventions
@@ -52,7 +49,7 @@ See [`AGENTS.md`](./AGENTS.md) for the full list of pitfalls.
 
 ## Testing
 
-- Framework: **Vitest 3** (`globals: true`, `environment: 'node'`).
+- Framework: **Vitest 3** (`globals: true`, `environment: 'node'`) with enforced coverage thresholds.
 - Tests live in `test/engine/`, `test/utils/`, `test/workers/`, and `test/tools/` covering
   the dependency graph, planner, policy engine, semver utils, all workers, and tool handlers.
 - Add tests alongside any behavior change; don't weaken assertions to make tests pass.
@@ -67,4 +64,4 @@ and `summarize`.
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the [MIT License](./mcp/springbreaker/README.md#license) (as declared in the server README).
+By contributing, you agree that your contributions are licensed under the [MIT License](./mcp/springbreaker/LICENSE).

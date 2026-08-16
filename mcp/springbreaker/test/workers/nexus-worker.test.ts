@@ -17,10 +17,27 @@ describe("NexusWorker", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    worker = new NexusWorker("http://nexus:8081", "admin", "password");
+    worker = new NexusWorker("https://nexus.example.test", "admin", "password");
   });
 
   describe("search", () => {
+    it("follows Nexus continuation tokens", async () => {
+      mockFetch
+        .mockResolvedValueOnce(jsonResponse({
+          items: [{ group: "com.example", name: "lib", version: "1.0.0", repository: "r", format: "maven2", assets: [] }],
+          continuationToken: "next page/token",
+        }))
+        .mockResolvedValueOnce(jsonResponse({
+          items: [{ group: "com.example", name: "lib", version: "1.0.1", repository: "r", format: "maven2", assets: [] }],
+          continuationToken: null,
+        }));
+
+      const results = await worker.search("com.example", "lib");
+      expect(results.map((artifact) => artifact.version)).toEqual(["1.0.0", "1.0.1"]);
+      const secondUrl = new URL(String(mockFetch.mock.calls[1][0]));
+      expect(secondUrl.searchParams.get("continuationToken")).toBe("next page/token");
+    });
+
     it("returns mapped artifacts from search results", async () => {
       mockFetch.mockResolvedValueOnce(
         jsonResponse({

@@ -1,0 +1,15 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /mcp/springbreaker
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      springbreaker-dependencies:
+        patterns:
+          - "*"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
