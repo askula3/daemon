@@ -1,6 +1,18 @@
-import { XMLParser, XMLBuilder } from "fast-xml-parser";
-import { readFile, writeFile, access, copyFile } from "node:fs/promises";
-import { join } from "node:path";
+import { XMLParser, XMLBuilder, XMLValidator } from "fast-xml-parser";
+import {
+  readFile,
+  access,
+  copyFile,
+  mkdtemp,
+  open,
+  realpath,
+  rename,
+  rm,
+  stat,
+} from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { createChildLogger } from "../utils/logger.js";
 import { POMError } from "../utils/errors.js";
 import type {
@@ -15,6 +27,7 @@ const parserOptions = {
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
   allowBooleanAttributes: true,
+  commentPropName: "#comment",
   // CRITICAL: keep all text values as strings. With parseTagValue:true,
   // fast-xml-parser coerces numeric-looking text to JS numbers, so
   // <version>2.0.0</version> becomes 2 and re-serializes as <version>2</version>,
@@ -41,6 +54,7 @@ const builderOptions = {
   format: true,
   indentBy: "  ",
   suppressEmptyNode: true,
+  commentPropName: "#comment",
 };
 
 async function fileExists(path: string): Promise<boolean> {
@@ -50,6 +64,36 @@ async function fileExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function atomicWrite(path: string, content: string | Buffer): Promise<void> {
+  const temporaryPath = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    const mode = (await stat(path).catch(() => undefined))?.mode;
+    handle = await open(temporaryPath, "wx", mode);
+    await handle.writeFile(content);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await rename(temporaryPath, path);
+    // Best-effort directory sync makes the rename durable across power loss on
+    // filesystems that support fsync on directory handles.
+    const directoryHandle = await open(dirname(path), "r").catch(() => undefined);
+    if (directoryHandle) {
+      await directoryHandle.sync().catch(() => undefined);
+      await directoryHandle.close();
+    }
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+function isWithin(root: string, candidate: string): boolean {
+  const fromRoot = relative(root, candidate);
+  return fromRoot === "" || (!fromRoot.startsWith("..") && !isAbsolute(fromRoot));
 }
 
 export class POMWorker {
@@ -69,6 +113,10 @@ export class POMWorker {
 
     const content = await readFile(pomPath, "utf-8");
     try {
+      const validation = XMLValidator.validate(content);
+      if (validation !== true) {
+        throw new Error(validation.err.msg);
+      }
       return this.parser.parse(content) as Record<string, unknown>;
     } catch (error) {
       throw new POMError(`Failed to parse POM: ${error}`);
@@ -90,7 +138,9 @@ export class POMWorker {
   ): Promise<void> {
     try {
       const xml = this.builder.build(pomData);
-      await writeFile(pomPath, xml, "utf-8");
+      const validation = XMLValidator.validate(xml);
+      if (validation !== true) throw new Error(validation.err.msg);
+      await atomicWrite(pomPath, xml);
       log.info(`POM written: ${pomPath}`);
     } catch (error) {
       throw new POMError(`Failed to write POM: ${error}`);
@@ -98,8 +148,9 @@ export class POMWorker {
   }
 
   // Create backup of pom.xml (truly async)
-  async backupPom(pomPath: string): Promise<string> {
-    const backupPath = `${pomPath}.backup.${Date.now()}`;
+  async backupPom(pomPath: string, backupDirectory?: string): Promise<string> {
+    const directory = backupDirectory ?? await mkdtemp(join(tmpdir(), "springbreaker-backup-"));
+    const backupPath = join(directory, `${basename(pomPath)}.backup.${randomUUID()}`);
     await copyFile(pomPath, backupPath);
     log.info(`POM backed up: ${backupPath}`);
     return backupPath;
@@ -110,7 +161,7 @@ export class POMWorker {
     if (!(await fileExists(backupPath))) {
       throw new POMError(`Backup not found: ${backupPath}`);
     }
-    await copyFile(backupPath, pomPath);
+    await atomicWrite(pomPath, await readFile(backupPath));
     log.info(`POM restored from: ${backupPath}`);
   }
 
@@ -373,6 +424,26 @@ export class POMWorker {
     return false;
   }
 
+  /** Add or update a dependencyManagement override for a transitive dependency. */
+  setManagedDependencyVersion(
+    pomData: Record<string, unknown>,
+    groupId: string,
+    artifactId: string,
+    version: string,
+  ): void {
+    const project = (pomData.project as Record<string, unknown>) || {};
+    if (!project.dependencyManagement) project.dependencyManagement = { dependencies: { dependency: [] } };
+    const management = project.dependencyManagement as Record<string, unknown>;
+    if (!management.dependencies) management.dependencies = { dependency: [] };
+    const dependencies = management.dependencies as Record<string, unknown>;
+    if (!Array.isArray(dependencies.dependency)) dependencies.dependency = [];
+    const managed = dependencies.dependency as Array<Record<string, unknown>>;
+    const existing = managed.find((entry) => this.matchesDependency(entry, groupId, artifactId));
+    if (existing) existing.version = version;
+    else managed.push({ groupId, artifactId, version });
+    log.info(`Set managed dependency ${groupId}:${artifactId} to ${version}`);
+  }
+
   // Update parent version (synchronous mutation of in-memory data)
   updateParentVersion(
     pomData: Record<string, unknown>,
@@ -555,29 +626,33 @@ export class POMWorker {
 
   // Find pom.xml files in a project (truly async)
   async findPomFiles(projectPath: string): Promise<string[]> {
-    const pomFiles: string[] = [];
-    const rootPom = join(projectPath, "pom.xml");
+    const canonicalRoot = await realpath(projectPath);
+    const rootPom = join(canonicalRoot, "pom.xml");
+    if (!(await fileExists(rootPom))) throw new POMError(`POM file not found: ${rootPom}`);
 
-    if (await fileExists(rootPom)) {
-      pomFiles.push(rootPom);
-    }
-
-    // Check for multi-module
-    try {
-      const rootPomData = await this.readPom(rootPom);
-      const modules = this.extractModules(rootPomData);
-
-      for (const module of modules) {
-        const modulePom = join(projectPath, module, "pom.xml");
-        if (await fileExists(modulePom)) {
-          pomFiles.push(modulePom);
-        }
+    const discovered: string[] = [];
+    const visited = new Set<string>();
+    const visit = async (pomPath: string): Promise<void> => {
+      const canonicalPom = await realpath(pomPath).catch(() => {
+        throw new POMError(`Declared module POM not found: ${pomPath}`);
+      });
+      if (!isWithin(canonicalRoot, canonicalPom)) {
+        throw new POMError(`Declared module escapes project root: ${pomPath}`);
       }
-    } catch {
-      // Ignore errors, just return what we found
-    }
+      if (visited.has(canonicalPom)) return;
+      visited.add(canonicalPom);
+      discovered.push(canonicalPom);
 
-    return pomFiles;
+      const pomData = await this.readPom(canonicalPom);
+      const project = (pomData.project as Record<string, unknown>) ?? {};
+      for (const module of this.extractModules(project)) {
+        const modulePom = resolve(dirname(canonicalPom), module, "pom.xml");
+        await visit(modulePom);
+      }
+    };
+
+    await visit(rootPom);
+    return discovered;
   }
 
   // Check if a property is defined in POM

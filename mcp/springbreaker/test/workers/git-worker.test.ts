@@ -16,6 +16,7 @@ const mockGitInstance = {
   tags: vi.fn(),
   log: vi.fn(),
   raw: vi.fn(),
+  checkIsRepo: vi.fn(),
 };
 
 vi.mock("simple-git", () => ({
@@ -40,6 +41,7 @@ describe("GitWorker", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGitInstance.checkIsRepo.mockResolvedValue(true);
     worker = new GitWorker();
   });
 
@@ -102,6 +104,8 @@ describe("GitWorker", () => {
         deleted: [],
         renamed: [],
         conflicted: [],
+        files: [{ path: "src/index.ts" }],
+        isClean: vi.fn(() => false),
       });
 
       const status = await worker.getStatus("/project");
@@ -127,22 +131,18 @@ describe("GitWorker", () => {
     });
   });
 
-  describe("add", () => {
-    it("stages files", async () => {
+  describe("commitFiles", () => {
+    it("stages only requested files and commits", async () => {
       mockGitInstance.add.mockResolvedValue(undefined);
-
-      await worker.add("/project", ".");
-
-      expect(mockGitInstance.add).toHaveBeenCalledWith(".");
-    });
-  });
-
-  describe("commit", () => {
-    it("commits with message", async () => {
       mockGitInstance.commit.mockResolvedValue({ commit: "abc123" });
 
-      const hash = await worker.commit("/project", "fix: update dependency");
+      const hash = await worker.commitFiles(
+        "/project",
+        ["pom.xml", "module/pom.xml"],
+        "fix: update dependency",
+      );
 
+      expect(mockGitInstance.add).toHaveBeenCalledWith(["pom.xml", "module/pom.xml"]);
       expect(mockGitInstance.commit).toHaveBeenCalledWith("fix: update dependency");
       expect(hash).toBe("abc123");
     });
@@ -153,23 +153,10 @@ describe("GitWorker", () => {
       const result = await worker.isGitRepo("/project");
       expect(result).toBe(true);
     });
-  });
 
-  describe("getDiff", () => {
-    it("returns diff output", async () => {
-      mockGitInstance.diff.mockResolvedValue("--- a/file.ts\n+++ b/file.ts");
-
-      const result = await worker.getDiff("/project");
-      expect(result).toContain("--- a/file.ts");
-    });
-  });
-
-  describe("getTags", () => {
-    it("returns tag list", async () => {
-      mockGitInstance.tags.mockResolvedValue({ all: ["v1.0.0", "v1.1.0"], latest: "v1.1.0" });
-
-      const result = await worker.getTags("/project");
-      expect(result).toContain("v1.0.0");
+    it("returns false when Git rejects the path", async () => {
+      mockGitInstance.checkIsRepo.mockRejectedValueOnce(new Error("not a repository"));
+      await expect(worker.isGitRepo("/project")).resolves.toBe(false);
     });
   });
 });

@@ -14,6 +14,34 @@ export interface RetryOptions {
   isRetryable?: (error: unknown) => boolean;
   /** Label for log messages. */
   label?: string;
+  /** Abort the active attempt or an exponential-backoff wait. */
+  signal?: AbortSignal;
+}
+
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error("Operation cancelled");
+}
+
+async function wait(delay: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    return;
+  }
+  if (signal.aborted) throw abortError(signal);
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }, delay);
+    const abort = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+      reject(abortError(signal));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+  });
 }
 
 /**
@@ -43,15 +71,19 @@ export async function withRetry<T>(
     maxDelayMs = 30000,
     isRetryable,
     label = "operation",
+    signal,
   } = options;
 
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (signal?.aborted) throw abortError(signal);
     try {
       return await fn();
     } catch (error) {
       lastError = error;
+
+      if (signal?.aborted) throw abortError(signal);
 
       // Check if the error is retryable
       const retryable = isRetryable ? isRetryable(error) : true;
@@ -71,7 +103,7 @@ export async function withRetry<T>(
           `retrying in ${Math.round(delay)}ms: ${error instanceof Error ? error.message : String(error)}`,
       );
 
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      await wait(delay, signal);
     }
   }
 

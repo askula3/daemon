@@ -40,7 +40,9 @@ export class Planner {
     components: Component[],
     projectId: string,
     projectInfo?: ProjectInfo,
+    signal?: AbortSignal,
   ): Promise<ExecutionPlan> {
+    signal?.throwIfAborted();
     log.info(`Creating plan for ${components.length} components`);
 
     const tasks: RemediationTask[] = [];
@@ -55,9 +57,11 @@ export class Planner {
       ) &&
       projectInfo?.springBootVersion
     ) {
-      const bootTask = this.createSpringBootUpgradeTask(
+      const bootTask = await this.createSpringBootUpgradeTask(
         projectInfo.springBootVersion,
         components,
+        projectInfo,
+        signal,
       );
       if (bootTask) {
         tasks.push(bootTask);
@@ -68,7 +72,7 @@ export class Planner {
     // Process each vulnerable component (bounded concurrency for Nexus lookups)
     const componentTasks = await Promise.all(
       components.map((component) =>
-        nexusLimit(() => this.createTasksForComponent(component, graph)),
+        nexusLimit(() => this.createTasksForComponent(component, graph, projectInfo, signal)),
       ),
     );
     for (const ct of componentTasks) {
@@ -86,6 +90,21 @@ export class Planner {
 
     // Estimate duration
     const estimatedDuration = this.estimateDuration(batches);
+    const taskCoordinates = new Set(
+      tasks.map((task) => `${task.component.groupId}:${task.component.artifactId}`),
+    );
+    const plannedFixIds = new Set(tasks.flatMap((task) => task.expectedFixes));
+    const planningIssues = components
+      .filter((component) =>
+        !taskCoordinates.has(`${component.groupId}:${component.artifactId}`) &&
+        component.vulnerabilities.some((vulnerability) => !plannedFixIds.has(vulnerability.id)),
+      )
+      .map((component) => ({
+        groupId: component.groupId,
+        artifactId: component.artifactId,
+        vulnerabilityIds: component.vulnerabilities.map((vulnerability) => vulnerability.id),
+        reason: "No policy-compliant, writable remediation target could be proven",
+      }));
 
     // Compute severity breakdown from components
     const vulnerabilitiesBySeverity: SummaryCount = {
@@ -118,6 +137,7 @@ export class Planner {
     const plan: ExecutionPlan = {
       id: randomUUID(),
       projectId,
+      projectPath: projectInfo?.projectPath ?? "",
       tasks,
       batches,
       estimatedDuration,
@@ -126,6 +146,18 @@ export class Planner {
       createdAt: new Date().toISOString(),
       policyUsed: this.policyEngine.getPolicy(),
       vulnerabilitiesBySeverity,
+      vulnerabilityIds: components.flatMap((component) =>
+        component.vulnerabilities.map((vulnerability) => vulnerability.id),
+      ),
+      vulnerabilityOccurrences: components.flatMap((component) =>
+        component.vulnerabilities.map((vulnerability) => ({
+          groupId: component.groupId,
+          artifactId: component.artifactId,
+          version: component.version,
+          vulnerabilityId: vulnerability.id,
+        })),
+      ),
+      planningIssues,
       // Plan immutability fields — set by build-plan.ts after planner returns
       gitRevision: projectInfo?.gitRevision ?? "",
       projectFingerprint: "",
@@ -142,7 +174,10 @@ export class Planner {
   private async createTasksForComponent(
     component: Component,
     graph: DependencyGraph,
+    projectInfo?: ProjectInfo,
+    signal?: AbortSignal,
   ): Promise<RemediationTask[]> {
+    signal?.throwIfAborted();
     const tasks: RemediationTask[] = [];
 
     // Find the node in the graph
@@ -153,7 +188,6 @@ export class Planner {
     const isDirect =
       node?.isDirect ?? graph.directDependencies.includes(packageUrl);
     const isManagedBySpringBoot = node?.isManagedBySpringBoot ?? false;
-    const isUnused = node ? !node.isUsed : false;
 
     // Spring Boot Rule: if a dependency is managed by Spring Boot, DO NOT
     // override it individually. The dedicated Spring Boot upgrade task handles
@@ -166,69 +200,101 @@ export class Planner {
       return tasks;
     }
 
-    // Get target version from IQ suggestion or Nexus search
-    const targetVersion = await this.findBestVersion(component);
-
-    if (!targetVersion) {
-      log.warn(
-        `No valid target version found for ${component.groupId}:${component.artifactId}`,
-      );
+    // A transitive dependency can only be overridden when IQ identifies a
+    // concrete fixed version. Repository "latest" is not proof of remediation.
+    const requiresOverride = !isDirect && !node?.isDeclaredInDependencyManagement;
+    const declarations = projectInfo?.dependencyDeclarations.filter(
+      (declaration) => declaration.groupId === component.groupId && declaration.artifactId === component.artifactId,
+    ) ?? [];
+    const targetPoms: Array<string | undefined> = !projectInfo
+      ? [undefined]
+      : requiresOverride
+        ? [projectInfo.rootPomPath]
+        : [...new Set(declarations.map((declaration) => declaration.pomPath))];
+    if (targetPoms.length === 0) {
+      log.warn(`No writable POM declaration found for ${component.groupId}:${component.artifactId}`);
       return tasks;
     }
 
-    // Determine priority
-    const priority = this.policyEngine.determinePriority(
-      component,
-      node ?? undefined,
-      isManagedBySpringBoot,
-      isDirect,
-      isUnused,
-    );
-
-    // Create task
-    const task = this.policyEngine.createTask(
-      component,
-      priority,
-      targetVersion,
-      this.getTaskDependencies(component, graph),
-    );
-
-    tasks.push(task);
+    let resolvedTargetVersion: string | null | undefined;
+    for (const pomPath of targetPoms) {
+      const isUnused = Boolean(pomPath && projectInfo?.unusedDependencyDeclarations?.some(
+        (declaration) => declaration.pomPath === pomPath &&
+          declaration.groupId === component.groupId &&
+          declaration.artifactId === component.artifactId,
+      ));
+      const priority = requiresOverride ? "override-transitive" : this.policyEngine.determinePriority(
+        component,
+        node ?? undefined,
+        isManagedBySpringBoot,
+        isDirect,
+        isUnused,
+      );
+      if (priority !== "remove-unused" && resolvedTargetVersion === undefined) {
+        resolvedTargetVersion = requiresOverride
+          ? this.findKnownFixedVersion(component)
+          : await this.findBestVersion(component, signal);
+      }
+      const targetVersion = priority === "remove-unused"
+        ? component.version
+        : resolvedTargetVersion;
+      if (!targetVersion) {
+        log.warn(`No valid target version found for ${component.groupId}:${component.artifactId}`);
+        continue;
+      }
+      const task = this.policyEngine.createTask(
+        component,
+        priority,
+        targetVersion,
+        this.getTaskDependencies(component, graph),
+      );
+      task.pomPath = pomPath;
+      task.module = projectInfo?.projectPath && pomPath && pomPath !== projectInfo.rootPomPath
+        ? pomPath.slice(projectInfo.projectPath.length + 1).replace(/\/pom\.xml$/, "")
+        : undefined;
+      if (priority !== "remove-unused") {
+        task.expectedFixes = component.vulnerabilities
+          .filter((vulnerability) =>
+            vulnerability.suggestedVersion === targetVersion || vulnerability.fixVersions.includes(targetVersion),
+          )
+          .map((vulnerability) => vulnerability.id);
+        const expectedIds = new Set(task.expectedFixes);
+        task.expectedVulnerabilities = task.expectedVulnerabilities.filter((occurrence) =>
+          expectedIds.has(occurrence.vulnerabilityId),
+        );
+      } else {
+        task.confidence = "medium";
+        task.risk = "medium";
+        task.reason += "; Maven dependency analysis classified this direct declaration as unused";
+      }
+      if (task.expectedFixes.length === 0 && priority !== "remove-unused") {
+        task.confidence = "low";
+        task.reason += "; repository candidate must be confirmed by the post-batch IQ scan";
+      }
+      tasks.push(task);
+    }
 
     return tasks;
   }
 
   // Create a Spring Boot parent upgrade task
   // Finds the best target version from IQ suggestions across Spring Boot managed components
-  private createSpringBootUpgradeTask(
+  private async createSpringBootUpgradeTask(
     currentBootVersion: string,
     components: Component[],
-  ): RemediationTask | null {
-    // Collect all suggested versions from Spring Boot managed components
-    const suggestedVersions: string[] = [];
-    for (const comp of components) {
-      for (const vuln of comp.vulnerabilities) {
-        if (vuln.suggestedVersion) {
-          suggestedVersions.push(vuln.suggestedVersion);
-        }
-      }
-    }
-
-    // Find the highest suggested version that's newer than current
-    let targetVersion: string | null = null;
-    const sorted = [...suggestedVersions].sort((a, b) => compareVersions(b, a));
-    for (const v of sorted) {
-      if (compareVersions(v, currentBootVersion) > 0) {
-        const evaluation = this.policyEngine.evaluateIQSuggestion(
-          v,
-          currentBootVersion,
-        );
-        if (evaluation.accepted) {
-          targetVersion = v;
-          break;
-        }
-      }
-    }
+    projectInfo: ProjectInfo,
+    signal?: AbortSignal,
+  ): Promise<RemediationTask | null> {
+    const bootComponent: Component = {
+      packageUrl: `pkg:maven/org.springframework.boot/spring-boot-dependencies@${currentBootVersion}`,
+      displayName: `org.springframework.boot:spring-boot-dependencies:${currentBootVersion}`,
+      version: currentBootVersion,
+      groupId: "org.springframework.boot",
+      artifactId: "spring-boot-dependencies",
+      extension: "pom",
+      vulnerabilities: [],
+    };
+    const targetVersion = await this.findBestVersion(bootComponent, signal);
 
     if (!targetVersion) {
       log.warn(
@@ -237,13 +303,20 @@ export class Planner {
       return null;
     }
 
-    // Count how many vulnerabilities this upgrade would fix
-    const expectedFixes: string[] = [];
-    for (const comp of components) {
-      for (const vuln of comp.vulnerabilities) {
-        expectedFixes.push(vuln.id);
-      }
-    }
+    const graph = this.graphBuilder.getGraph();
+    const expectedFixes = components
+      .filter((component) => graph.nodes.get(component.packageUrl)?.isManagedBySpringBoot)
+      .flatMap((component) => component.vulnerabilities.map((vulnerability) => vulnerability.id));
+    const expectedVulnerabilities = components
+      .filter((component) => graph.nodes.get(component.packageUrl)?.isManagedBySpringBoot)
+      .flatMap((component) =>
+        component.vulnerabilities.map((vulnerability) => ({
+          groupId: component.groupId,
+          artifactId: component.artifactId,
+          version: component.version,
+          vulnerabilityId: vulnerability.id,
+        })),
+      );
 
     return {
       id: randomUUID(),
@@ -251,13 +324,14 @@ export class Planner {
       description: `Upgrade Spring Boot ${currentBootVersion} → ${targetVersion}`,
       component: {
         groupId: "org.springframework.boot",
-        artifactId: "spring-boot-starter-parent",
+        artifactId: projectInfo.parentArtifactId ?? "spring-boot-dependencies",
         currentVersion: currentBootVersion,
         targetVersion,
       },
-      reason: `Spring Boot upgrade addresses ${expectedFixes.length} managed dependency vulnerabilities`,
+      reason: `Spring Boot BOM candidate for ${expectedFixes.length} managed dependency vulnerabilities; post-batch IQ verification is required`,
       expectedFixes,
-      confidence: "high",
+      expectedVulnerabilities,
+      confidence: "medium",
       risk: "medium",
       preconditions: [
         "Project builds successfully",
@@ -273,46 +347,44 @@ export class Planner {
       ],
       dependencies: [],
       status: "pending",
+      metadata: {
+        springBootVersionSource: projectInfo.springBootVersionSource,
+        springBootVersionProperty: projectInfo.springBootVersionProperty,
+      },
+      pomPath: projectInfo.rootPomPath,
     };
   }
 
   // Find best version for a component
-  private async findBestVersion(component: Component): Promise<string | null> {
-    // First, check IQ suggestions
-    for (const vuln of component.vulnerabilities) {
-      if (vuln.suggestedVersion) {
-        const evaluation = this.policyEngine.evaluateIQSuggestion(
-          vuln.suggestedVersion,
-          component.version,
+  private async findBestVersion(component: Component, signal?: AbortSignal): Promise<string | null> {
+    const knownVersion = this.findKnownFixedVersion(component);
+    if (knownVersion && this.nexusWorker) {
+      try {
+        const artifact = await this.nexusWorker.searchVersion(
+          component.groupId,
+          component.artifactId,
+          knownVersion,
+          undefined,
+          signal,
         );
-        if (evaluation.accepted) {
-          return vuln.suggestedVersion;
-        }
+        if (artifact) return knownVersion;
+        log.warn(
+          `IQ candidate ${component.groupId}:${component.artifactId}:${knownVersion} ` +
+          "was not found in Nexus; continuing repository resolution",
+        );
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        log.warn(
+          `Could not confirm IQ candidate in Nexus for ` +
+          `${component.groupId}:${component.artifactId}: ${error}`,
+        );
       }
+    } else if (knownVersion) {
+      // IQ-only deployments may use repositories unknown to Maven Central.
+      // Resolution/build and post-batch IQ verification remain mandatory.
+      return knownVersion;
     }
 
-    // Check fix versions from vulnerabilities — use proper semver comparison
-    for (const vuln of component.vulnerabilities) {
-      if (vuln.fixVersions && vuln.fixVersions.length > 0) {
-        // Sort a COPY of fix versions descending (newest first) — avoid mutating the original
-        const sorted = [...vuln.fixVersions].sort((a, b) =>
-          compareVersions(b, a),
-        );
-
-        // Check each fix version
-        for (const fixVersion of sorted) {
-          const evaluation = this.policyEngine.evaluateIQSuggestion(
-            fixVersion,
-            component.version,
-          );
-          if (evaluation.accepted) {
-            return fixVersion;
-          }
-        }
-      }
-    }
-
-    // Fall back to Nexus search if no IQ suggestion was accepted
     if (this.nexusWorker) {
       try {
         const policy = this.policyEngine.getPolicy();
@@ -323,9 +395,11 @@ export class Planner {
           {
             allowMinor: policy.allowMinor,
             allowMajor: policy.allowMajor,
+            allowPatch: policy.allowPatch,
             allowSnapshots: policy.allowSnapshots,
             allowPreRelease: false,
             allowRedHat: policy.allowRedhat,
+            signal,
           },
         );
         if (result.suggested) {
@@ -335,13 +409,11 @@ export class Planner {
           return result.suggested;
         }
       } catch (error) {
-        log.warn(
-          `Nexus search failed for ${component.groupId}:${component.artifactId}: ${error}`,
-        );
+        if (signal?.aborted) throw error;
+        log.warn(`Nexus search failed for ${component.groupId}:${component.artifactId}: ${error}`);
       }
     }
 
-    // Fall back to Maven Central if no IQ suggestion or Nexus result
     if (this.mavenCentralWorker) {
       try {
         const policy = this.policyEngine.getPolicy();
@@ -352,9 +424,11 @@ export class Planner {
           {
             allowMinor: policy.allowMinor,
             allowMajor: policy.allowMajor,
+            allowPatch: policy.allowPatch,
             allowSnapshots: policy.allowSnapshots,
             allowPreRelease: false,
             allowRedHat: policy.allowRedhat,
+            signal,
           },
         );
         if (result.suggested) {
@@ -364,12 +438,23 @@ export class Planner {
           return result.suggested;
         }
       } catch (error) {
-        log.warn(
-          `Maven Central search failed for ${component.groupId}:${component.artifactId}: ${error}`,
-        );
+        if (signal?.aborted) throw error;
+        log.warn(`Maven Central search failed for ${component.groupId}:${component.artifactId}: ${error}`);
       }
     }
+    return null;
+  }
 
+  private findKnownFixedVersion(component: Component): string | null {
+    const suggested = [...new Set(component.vulnerabilities
+      .map((vulnerability) => vulnerability.suggestedVersion)
+      .filter((version): version is string => Boolean(version)))].sort(compareVersions);
+    const fixed = [...new Set(component.vulnerabilities
+      .flatMap((vulnerability) => vulnerability.fixVersions))].sort(compareVersions);
+    for (const candidate of [...suggested, ...fixed]) {
+      const evaluation = this.policyEngine.evaluateIQSuggestion(candidate, component.version);
+      if (evaluation.accepted) return candidate;
+    }
     return null;
   }
 
@@ -489,12 +574,15 @@ export class Planner {
         break;
       }
 
-      // Mark batch as processed
+      // Mark the whole ready layer as processed, then respect the configured
+      // maximum batch size without changing DAG semantics.
       for (const task of batch) {
         processed.add(task.id);
       }
-
-      batches.push(batch);
+      const maxBatchSize = this.policyEngine.getPolicy().maxBatchSize ?? batch.length;
+      for (let index = 0; index < batch.length; index += maxBatchSize) {
+        batches.push(batch.slice(index, index + maxBatchSize));
+      }
     }
 
     return batches;

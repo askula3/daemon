@@ -1,74 +1,53 @@
 import { z } from "zod";
 
-// Schema for inspect_project
+const ProjectPathSchema = z.string().trim().min(1).max(4096)
+  .describe("Canonicalizable path to the Maven project root");
+
 export const InspectProjectSchema = z.object({
-  projectPath: z.string().describe("Path to the Maven project root"),
-});
+  projectPath: ProjectPathSchema,
+}).strict();
 
-// Schema for build_plan
-export const BuildPlanSchema = z
-  .object({
-    projectPath: z.string().describe("Path to the Maven project root"),
-    severity: z
-      .array(z.enum(["CRITICAL", "HIGH", "MEDIUM", "LOW"]))
-      .optional()
-      .describe("Severity levels to address"),
-    policy: z
-      .object({
-        allowPatch: z.boolean().optional(),
-        allowMinor: z.boolean().optional(),
-        allowMajor: z.boolean().optional(),
-        allowSnapshots: z.boolean().optional(),
-        allowRedhat: z.boolean().optional(),
-      })
-      .optional()
-      .describe("Policy overrides"),
-  })
-  .describe("Build an execution plan for vulnerability remediation");
+export const BuildPlanSchema = z.object({
+  projectPath: ProjectPathSchema,
+  severity: z.array(z.enum(["CRITICAL", "HIGH", "MEDIUM", "LOW"]))
+    .min(1).optional().describe("Severity levels to address"),
+  policy: z.object({
+    allowPatch: z.boolean().optional(),
+    allowMinor: z.boolean().optional(),
+    allowMajor: z.boolean().optional(),
+    allowSnapshots: z.boolean().optional(),
+    allowRedhat: z.boolean().optional(),
+    verifyBuild: z.boolean().optional(),
+    verifyIq: z.boolean().optional(),
+    maxBatchSize: z.number().int().positive().max(100).optional(),
+    timeout: z.number().int().positive().max(3_600_000).optional(),
+  }).strict().optional().describe("Validated policy overrides for this plan"),
+}).strict().describe("Build an immutable vulnerability remediation plan");
 
-// Schema for execute_plan
-export const ExecutePlanSchema = z
-  .object({
-    projectPath: z.string().describe("Path to the Maven project root"),
-    planId: z.string().describe("ID of the plan to execute"),
-    approvedTasks: z
-      .array(z.string())
-      .optional()
-      .describe("Task IDs to execute (empty = all)"),
-    dryRun: z
-      .boolean()
-      .optional()
-      .describe("Preview changes without modifying files (spec §37)"),
-    commit: z
-      .boolean()
-      .optional()
-      .default(false)
-      .describe("Auto-commit changes after successful execution (spec §5 — default off)"),
-    createBranch: z
-      .boolean()
-      .optional()
-      .default(false)
-      .describe("Create a feature branch before modifying files (spec §5 — default off)"),
-  })
-  .describe("Execute an approved remediation plan");
+export const ExecutePlanSchema = z.object({
+  projectPath: ProjectPathSchema,
+  planId: z.string().uuid().describe("ID of the immutable plan to execute"),
+  approvedTasks: z.array(z.string().uuid()).min(1).max(100).optional()
+    .describe("Explicit non-empty list of approved task IDs"),
+  approveAll: z.boolean().optional().default(false)
+    .describe("Explicitly approve every task in the plan"),
+  dryRun: z.boolean().optional().default(false)
+    .describe("Preview approved changes without modifying files"),
+  commit: z.boolean().optional().default(false)
+    .describe("Commit only SpringBreaker-modified POMs after success"),
+  createBranch: z.boolean().optional().default(false)
+    .describe("Create a feature branch before modifying files"),
+}).strict().describe("Execute explicitly approved tasks from an immutable plan");
 
-// Schema for verify
-export const VerifySchema = z
-  .object({
-    projectPath: z.string().describe("Path to the Maven project root"),
-    skipBuild: z.boolean().optional().describe("Skip Maven build verification"),
-    skipIq: z.boolean().optional().describe("Skip IQ scan verification"),
-    compareWithExecutionId: z
-      .string()
-      .optional()
-      .describe("Execution ID to compare against for before/after delta"),
-  })
-  .describe("Verify build and run IQ scan");
+export const VerifySchema = z.object({
+  projectPath: ProjectPathSchema,
+  skipBuild: z.boolean().optional().default(false).describe("Skip Maven build verification"),
+  skipIq: z.boolean().optional().default(false).describe("Skip IQ scan verification"),
+  compareWithExecutionId: z.string().uuid().optional()
+    .describe("Execution ID to compare against for a before/after delta"),
+}).strict().describe("Verify the build and run a fresh IQ scan");
 
-// Schema for summarize
-export const SummarizeSchema = z
-  .object({
-    projectPath: z.string().describe("Path to the Maven project root"),
-    executionId: z.string().describe("ID of the execution to summarize"),
-  })
-  .describe("Generate summary of remediation results");
+export const SummarizeSchema = z.object({
+  projectPath: ProjectPathSchema,
+  executionId: z.string().uuid().describe("ID of the execution to summarize"),
+}).strict().describe("Generate a project-bound execution summary");

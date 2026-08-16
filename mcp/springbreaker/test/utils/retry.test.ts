@@ -77,5 +77,21 @@ describe("retry utilities", () => {
       expect(result).toBe("ok");
       expect(fn).toHaveBeenCalledTimes(2);
     });
+
+    it("cancels exponential backoff without another attempt", async () => {
+      const controller = new AbortController();
+      const fn = vi.fn().mockRejectedValue(new Error("transient"));
+      const result = withRetry(fn, {
+        maxRetries: 3,
+        baseDelayMs: 10_000,
+        signal: controller.signal,
+      });
+
+      await vi.waitFor(() => expect(fn).toHaveBeenCalledTimes(1));
+      controller.abort(new Error("cancelled"));
+
+      await expect(result).rejects.toThrow("cancelled");
+      expect(fn).toHaveBeenCalledTimes(1);
+    });
   });
 });

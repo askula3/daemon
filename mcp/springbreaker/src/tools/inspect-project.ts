@@ -8,18 +8,26 @@ import { MavenWorker } from "../workers/maven-worker.js";
 import { GitWorker } from "../workers/git-worker.js";
 import { InspectProjectSchema } from "./schemas.js";
 import { buildProjectInfo } from "./project-info.js";
+import { resolveProjectPath } from "../utils/project-path.js";
+import type { ToolContext } from "./context.js";
 
 const log = createChildLogger("InspectProject");
 
 // Tool: inspect_project
 export async function inspectProject(
   args: z.infer<typeof InspectProjectSchema>,
+  _context?: ToolContext,
 ): Promise<{
   content: { type: "text"; text: string }[];
 }> {
-  return withProjectLock(args.projectPath, async () => {
+  let projectPath: string;
+  try {
+    projectPath = await resolveProjectPath(args.projectPath);
+  } catch (error) {
+    return handleToolError(error);
+  }
+  return withProjectLock(projectPath, async () => {
     try {
-      const { projectPath } = args;
       log.info(`Inspecting project: ${projectPath}`);
 
       const envConfig = loadEnvConfig(projectPath);
@@ -27,6 +35,7 @@ export async function inspectProject(
       const mavenWorker = new MavenWorker(
         envConfig.preferMvnw,
         envConfig.mavenOpts,
+        envConfig.mavenEnvAllowlist,
       );
       const gitWorker = new GitWorker();
 
@@ -36,6 +45,7 @@ export async function inspectProject(
         mavenWorker,
         gitWorker,
         envConfig,
+        false,
       );
 
       // Add capability-aware recommendations

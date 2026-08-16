@@ -59,36 +59,28 @@ export class DependencyGraphBuilder {
   // Build graph from Maven dependency tree output
   buildFromMavenTree(treeOutput: string): void {
     this.reset();
-
-    const lines = treeOutput.split("\n");
-    // Stack of parents keyed by depth level — tracks the correct parent at each depth
     const parentAtDepth = new Map<number, string>();
+    const scopes = new Set<DependencyScope>(["compile", "runtime", "test", "provided", "system"]);
 
-    for (const line of lines) {
-      // Match dependency lines like: [INFO]    +- com.example:lib:jar:1.0.0:compile
-      // The prefix before the artifact contains tree chars and spaces.
-      // Depth calculation: prefix length follows pattern 2, 5, 8, 11...
-      // depth = (prefixLength + 1) / 3
-      const match = line.match(
-        /\[INFO\]\s+([ |+\-]+?)\s+([\w.\-]+):([\w.\-]+):([\w.\-]+):([\w.\-]+)(?::([\w.\-]+))?\s*:(compile|runtime|test|provided|system)/,
-      );
+    for (const rawLine of treeOutput.split("\n")) {
+      const content = rawLine.replace(/^\[INFO\]\s?/, "");
+      const match = content.match(/^((?:\|  |   )*)(?:\+- |\\- )(.+)$/);
+      if (!match || match[2].includes("omitted for")) continue;
+      const coordinate = match[2].trim().split(/\s+\(/, 1)[0];
+      const parts = coordinate.split(":");
+      const scope = parts.at(-1) as DependencyScope;
+      if (!scopes.has(scope) || (parts.length !== 5 && parts.length !== 6)) continue;
 
-      if (match) {
-        const prefix = match[1];
-        const depth = Math.floor((prefix.length + 1) / 3);
-        const groupId = match[2];
-        const artifactId = match[3];
-        // match[4] is the artifact type (jar, war, etc.)
-        const version = match[5];
-        const scope = match[7] as DependencyScope;
-
-        const packageUrl = `pkg:maven/${groupId}/${artifactId}@${version}`;
-        const isDirect = depth === 1;
-
-        // Determine parent: the node at depth-1, or null for root
-        const currentParent = parentAtDepth.get(depth - 1) ?? null;
-
-        const node: DependencyNode = {
+      const groupId = parts[0];
+      const artifactId = parts[1];
+      const version = parts.at(-2) ?? "";
+      if (!groupId || !artifactId || !version) continue;
+      const depth = match[1].length / 3 + 1;
+      const packageUrl = `pkg:maven/${groupId}/${artifactId}@${version}`;
+      const isDirect = depth === 1;
+      const currentParent = parentAtDepth.get(depth - 1) ?? null;
+      const existing = this.graph.nodes.get(packageUrl);
+      const node: DependencyNode = existing ?? {
           packageUrl,
           groupId,
           artifactId,
@@ -102,33 +94,25 @@ export class DependencyGraphBuilder {
           vulnerabilities: [],
           isUsed: true,
           depth,
-        };
-
-        this.graph.nodes.set(packageUrl, node);
-
-        if (isDirect) {
-          this.graph.directDependencies.push(packageUrl);
-        } else {
-          this.graph.transitiveDependencies.push(packageUrl);
-        }
-
-        // Add as child of parent
-        if (currentParent) {
-          const parentNode = this.graph.nodes.get(currentParent);
-          if (parentNode) {
-            parentNode.children.push(packageUrl);
-          }
-        }
-
-        // Store this node as the parent for its depth level
-        parentAtDepth.set(depth, packageUrl);
-
-        // Clear deeper levels — any children from a previous branch at depth > current
-        // are no longer relevant as parents
-        for (const key of parentAtDepth.keys()) {
-          if (key > depth) parentAtDepth.delete(key);
-        }
+      };
+      node.isDirect ||= isDirect;
+      node.depth = Math.min(node.depth, depth);
+      if (currentParent && !node.importedBy.includes(currentParent)) node.importedBy.push(currentParent);
+      this.graph.nodes.set(packageUrl, node);
+      const classification = isDirect ? this.graph.directDependencies : this.graph.transitiveDependencies;
+      if (!classification.includes(packageUrl)) classification.push(packageUrl);
+      if (isDirect) {
+        this.graph.transitiveDependencies = this.graph.transitiveDependencies.filter(
+          (candidate) => candidate !== packageUrl,
+        );
       }
+
+      if (currentParent) {
+        const parent = this.graph.nodes.get(currentParent);
+        if (parent && !parent.children.includes(packageUrl)) parent.children.push(packageUrl);
+      }
+      parentAtDepth.set(depth, packageUrl);
+      for (const key of parentAtDepth.keys()) if (key > depth) parentAtDepth.delete(key);
     }
 
     log.info(`Built graph with ${this.graph.nodes.size} nodes`);
@@ -142,16 +126,10 @@ export class DependencyGraphBuilder {
   ): void {
     if (!projectInfo.springBootVersion) return;
 
-    // Common Spring Boot managed dependencies
-    const defaultPrefixes = [
-      "pkg:maven/org.springframework.boot/",
-      "pkg:maven/com.fasterxml.jackson/",
-      "pkg:maven/org.apache.tomcat/",
-      "pkg:maven/org.yaml/",
-      "pkg:maven/ch.qos.logback/",
-      "pkg:maven/org.slf4j/",
-      "pkg:maven/io.micrometer/",
-    ];
+    // Only mark coordinates that can be attributed safely. Group-prefix
+    // guesses for third-party libraries can cause a component version to be
+    // written into the Spring Boot parent version.
+    const defaultPrefixes = ["pkg:maven/org.springframework.boot/"];
 
     // Merge with additional prefixes (from POM dependencyManagement)
     const allPrefixes = [

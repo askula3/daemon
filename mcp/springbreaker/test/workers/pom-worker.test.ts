@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { POMWorker } from "../../src/workers/pom-worker.js";
-import { writeFile, mkdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { writeFile, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 
 const TEST_DIR = join(tmpdir(), "pom-worker-test-" + Date.now());
@@ -174,6 +174,23 @@ describe("POMWorker", () => {
       expect((data.project as Record<string, unknown>).version).toBe(
         "1.0.0-RC1",
       );
+    });
+
+    it("preserves operator comments when rewriting a POM", async () => {
+      const pom = `<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <!-- Keep this upgrade constraint for the platform team. -->
+  <version>1.0.0</version>
+  <!-- Keep this release note too. -->
+</project>`;
+      await writeFile(POM_PATH, pom, "utf-8");
+
+      const data = await worker.readPom(POM_PATH);
+      await worker.writePom(POM_PATH, data);
+      const rewritten = await worker.readPomContent(POM_PATH);
+
+      expect(rewritten).toContain("Keep this upgrade constraint for the platform team.");
+      expect(rewritten).toContain("Keep this release note too.");
     });
   });
 
@@ -561,6 +578,37 @@ describe("POMWorker", () => {
       await expect(
         worker.restorePom("/nonexistent/backup.xml", POM_PATH),
       ).rejects.toThrow("not found");
+    });
+  });
+
+  describe("multi-module discovery", () => {
+    it("recursively discovers nested module POMs once", async () => {
+      const nested = join(TEST_DIR, "module-a", "nested");
+      await mkdir(nested, { recursive: true });
+      await writeFile(POM_PATH, `<?xml version="1.0"?><project><modules><module>module-a</module></modules></project>`, "utf-8");
+      await writeFile(join(TEST_DIR, "module-a", "pom.xml"),
+        `<?xml version="1.0"?><project><modules><module>nested</module></modules></project>`, "utf-8");
+      await writeFile(join(nested, "pom.xml"), `<?xml version="1.0"?><project/>`, "utf-8");
+
+      const poms = await worker.findPomFiles(TEST_DIR);
+      expect(poms).toHaveLength(3);
+      const canonicalRoot = await realpath(TEST_DIR);
+      expect(poms.map((path) => relative(canonicalRoot, path))).toEqual([
+        "pom.xml", "module-a/pom.xml", "module-a/nested/pom.xml",
+      ]);
+    });
+
+    it("rejects declared modules that escape the project root", async () => {
+      const outside = await mkdtemp(join(tmpdir(), "springbreaker-outside-module-"));
+      try {
+        await writeFile(join(outside, "pom.xml"), `<?xml version="1.0"?><project/>`, "utf-8");
+        await writeFile(POM_PATH,
+          `<?xml version="1.0"?><project><modules><module>${outside}</module></modules></project>`,
+          "utf-8");
+        await expect(worker.findPomFiles(TEST_DIR)).rejects.toThrow("escapes project root");
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
     });
   });
 

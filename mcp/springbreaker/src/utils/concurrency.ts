@@ -26,3 +26,4 @@ export function createConcurrencyLimiter(limit: number) {
 /** Singleton limiters — shared across a single MCP server process. */
 export const nexusLimit = createConcurrencyLimiter(CONCURRENCY_LIMITS.NEXUS);
 export const iqLimit = createConcurrencyLimiter(CONCURRENCY_LIMITS.IQ);
+export const mavenLimit = createConcurrencyLimiter(CONCURRENCY_LIMITS.MAVEN);
